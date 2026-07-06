@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GridLab Electrical Simulator</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">GL</div>
+          <div>
+            <h1>GridLab</h1>
+            <p>Electrical grid simulator</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button class="ghost-button" id="demoButton" type="button" title="Load demo network" aria-label="Load demo network">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 5h16v5H4z"></path>
+              <path d="M7 16h10"></path>
+              <path d="M9 10v6"></path>
+              <path d="M15 10v6"></path>
+              <path d="M7 19h10"></path>
+            </svg>
+          </button>
+          <button class="ghost-button" id="saveButton" type="button" title="Export grid" aria-label="Export grid">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 4h12l2 2v14H5z"></path>
+              <path d="M8 4v6h8V4"></path>
+              <path d="M8 16h8"></path>
+            </svg>
+          </button>
+          <button class="ghost-button" id="loadSavedButton" type="button" title="Import grid" aria-label="Import grid">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 20h14"></path>
+              <path d="M12 4v11"></path>
+              <path d="M8 11l4 4 4-4"></path>
+              <path d="M6 6h12"></path>
+            </svg>
+          </button>
+          <input id="importFileInput" type="file" accept="application/json,.json" hidden>
+          <button class="ghost-button" id="clearButton" type="button" title="Clear network" aria-label="Clear network">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16"></path>
+              <path d="M9 7V4h6v3"></path>
+              <path d="M7 7l1 13h8l1-13"></path>
+              <path d="M10 11v6"></path>
+              <path d="M14 11v6"></path>
+            </svg>
+          </button>
+          <button class="primary-button" id="solveButton" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 5v14l11-7z"></path>
+            </svg>
+            Solve
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="toolrail" aria-label="Grid tools">
+          <button class="tool-button active" type="button" data-mode="select" title="Select and move" aria-label="Select and move">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 3l13 9-6 1 4 7-3 1-4-7-4 5z"></path>
+            </svg>
+          </button>
+          <button class="tool-button" type="button" data-mode="source" title="Add source node" aria-label="Add source node">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8"></circle>
+              <path d="M13 4L8 13h4l-1 7 5-10h-4z"></path>
+            </svg>
+          </button>
+          <button class="tool-button" type="button" data-mode="joint" title="Add joint node" aria-label="Add joint node">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="6" cy="12" r="3"></circle>
+              <circle cx="18" cy="6" r="3"></circle>
+              <circle cx="18" cy="18" r="3"></circle>
+              <path d="M8.7 10.7l6.6-3.4"></path>
+              <path d="M8.7 13.3l6.6 3.4"></path>
+            </svg>
+          </button>
+          <button class="tool-button" type="button" data-mode="load" title="Add load node" aria-label="Add load node">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 16h14"></path>
+              <path d="M8 16l4-10 4 10"></path>
+              <path d="M9 20h6"></path>
+            </svg>
+          </button>
+          <button class="tool-button" type="button" data-mode="battery" title="Add battery node" aria-label="Add battery node">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 8h14v8H5z"></path>
+              <path d="M19 10h2v4h-2"></path>
+              <path d="M8 12h4"></path>
+              <path d="M14 10v4"></path>
+              <path d="M12 12h4"></path>
+            </svg>
+          </button>
+          <div class="tool-separator"></div>
+          <button class="tool-button" type="button" data-mode="line-distribution" title="Draw 10 kV distribution line" aria-label="Draw 10 kV distribution line">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 17L20 7"></path>
+              <path d="M7 15l4 3"></path>
+              <path d="M13 9l4 3"></path>
+              <text x="5" y="7">10</text>
+            </svg>
+          </button>
+          <button class="tool-button" type="button" data-mode="line-transmission" title="Draw 100 kV transmission line" aria-label="Draw 100 kV transmission line">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 17L20 7"></path>
+              <path d="M6 17h12"></path>
+              <path d="M12 12v7"></path>
+              <text x="3" y="7">100</text>
+            </svg>
+          </button>
+          <div class="tool-separator"></div>
+          <button class="tool-button" type="button" id="deleteButton" title="Delete selection" aria-label="Delete selection">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16"></path>
+              <path d="M9 7V4h6v3"></path>
+              <path d="M8 7l1 13h6l1-13"></path>
+            </svg>
+          </button>
+        </aside>
+
+        <section class="canvas-panel">
+          <canvas id="gridCanvas" aria-label="Electrical grid canvas"></canvas>
+          <div class="canvas-hud">
+            <button id="zoomOutButton" type="button" aria-label="Zoom out" title="Zoom out">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"></path></svg>
+            </button>
+            <span id="zoomReadout">100%</span>
+            <button id="zoomInButton" type="button" aria-label="Zoom in" title="Zoom in">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"></path><path d="M12 6v12"></path></svg>
+            </button>
+          </div>
+          <div class="status-chip" id="canvasStatus">Ready</div>
+        </section>
+
+        <aside class="inspector" id="inspector">
+          <div class="section-heading">
+            <h2>Network</h2>
+            <span id="solveBadge">Unsolved</span>
+          </div>
+          <div id="properties"></div>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <div id="networkSummary">0 nodes, 0 lines</div>
+        <div id="warningSummary">No warnings</div>
+      </footer>
+    </div>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
