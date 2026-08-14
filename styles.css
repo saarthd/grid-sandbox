@@ -127,12 +127,42 @@ button {
   font-weight: 760;
 }
 
+.primary-button.running {
+  border-color: rgba(199, 53, 53, 0.5);
+  background: var(--danger);
+}
+
+.time-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #26343c;
+  font-size: 12px;
+  font-weight: 780;
+  white-space: nowrap;
+}
+
 .primary-button:hover,
 .ghost-button:hover,
 .tool-button:hover,
 .canvas-hud button:hover,
 .mini-button:hover {
   transform: translateY(-1px);
+}
+
+button:disabled,
+select:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button:disabled:hover {
+  transform: none;
 }
 
 .primary-button:active,
