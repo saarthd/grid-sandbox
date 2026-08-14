@@ -2419,11 +2419,8 @@
         });
         markOperatingEdit("Selection power updated", false);
       };
-      powerNumber.addEventListener("input", () => {
-        if (!state.running) commitPower();
-      });
       powerNumber.addEventListener("keydown", (event) => {
-        if (!state.running || event.key !== "Enter") return;
+        if (event.key !== "Enter") return;
         event.preventDefault();
         commitPower();
       });
@@ -2701,11 +2698,8 @@
         draw();
       };
       range.addEventListener("input", (event) => updatePower(event.target.value));
-      number.addEventListener("input", (event) => {
-        if (!state.running) updatePower(event.target.value);
-      });
       number.addEventListener("keydown", (event) => {
-        if (!state.running || event.key !== "Enter") return;
+        if (event.key !== "Enter") return;
         event.preventDefault();
         updatePower(event.target.value);
       });
