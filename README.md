@@ -4,3 +4,4 @@ GridLab is a browser-based electrical grid simulator for building and running 10
 
 The project is a static site with no build step or server-side dependencies.
 
+The full sandbox release is a work in progress; stay tuned for the full explanation of mechanics!
