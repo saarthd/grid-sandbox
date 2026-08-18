@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GridLab Electrical Simulator</title>
+    <title>GRIDBOX Electrical Simulator</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-block">
-          <div class="brand-mark" aria-hidden="true">GL</div>
+          <div class="brand-mark" aria-hidden="true">GB</div>
           <div>
-            <h1>GridLab</h1>
+            <h1>GRIDBOX</h1>
             <p>Electrical grid simulator</p>
           </div>
         </div>
@@ -68,53 +68,33 @@
               <path d="M5 3l13 9-6 1 4 7-3 1-4-7-4 5z"></path>
             </svg>
           </button>
-          <button class="tool-button" type="button" data-mode="source" title="Add source node" aria-label="Add source node">
+          <button class="tool-button" type="button" data-mode="source" data-picker-trigger="source" title="Choose a source" aria-label="Choose a source">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="8"></circle>
               <path d="M13 4L8 13h4l-1 7 5-10h-4z"></path>
             </svg>
           </button>
-          <button class="tool-button" type="button" data-mode="joint" title="Add joint node" aria-label="Add joint node">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="6" cy="12" r="3"></circle>
-              <circle cx="18" cy="6" r="3"></circle>
-              <circle cx="18" cy="18" r="3"></circle>
-              <path d="M8.7 10.7l6.6-3.4"></path>
-              <path d="M8.7 13.3l6.6 3.4"></path>
-            </svg>
+          <button class="tool-button" type="button" data-mode="joint" data-joint-type="joint" title="Add substation" aria-label="Add substation">
+            <span class="tool-glyph substation-glyph" aria-hidden="true"></span>
           </button>
-          <button class="tool-button" type="button" data-mode="load" title="Add load node" aria-label="Add load node">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M5 16h14"></path>
-              <path d="M8 16l4-10 4 10"></path>
-              <path d="M9 20h6"></path>
-            </svg>
+          <button class="tool-button" type="button" data-mode="joint" data-joint-type="pole" title="Add distribution pole" aria-label="Add distribution pole">
+            <span class="tool-glyph pole-glyph" aria-hidden="true"></span>
+          </button>
+          <button class="tool-button" type="button" data-mode="joint" data-joint-type="tower" title="Add transmission tower" aria-label="Add transmission tower">
+            <span class="tool-glyph tower-glyph" aria-hidden="true"></span>
+          </button>
+          <button class="tool-button" type="button" data-mode="load" data-picker-trigger="load" title="Choose a load" aria-label="Choose a load">
+            <span class="tool-glyph load-glyph" aria-hidden="true"></span>
           </button>
           <button class="tool-button" type="button" data-mode="battery" title="Add battery node" aria-label="Add battery node">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M5 8h14v8H5z"></path>
-              <path d="M19 10h2v4h-2"></path>
-              <path d="M8 12h4"></path>
-              <path d="M14 10v4"></path>
-              <path d="M12 12h4"></path>
-            </svg>
+            <span class="tool-glyph battery-glyph" aria-hidden="true"></span>
           </button>
           <div class="tool-separator"></div>
-          <button class="tool-button" type="button" data-mode="line-distribution" title="Draw 10 kV distribution line" aria-label="Draw 10 kV distribution line">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 17L20 7"></path>
-              <path d="M7 15l4 3"></path>
-              <path d="M13 9l4 3"></path>
-              <text x="5" y="7">10</text>
-            </svg>
+          <button class="tool-button voltage-tool distribution-tool" type="button" data-mode="line-distribution" data-picker-trigger="distribution" title="Choose a 10 kV line" aria-label="Choose a 10 kV line">
+            <span>10 kV</span>
           </button>
-          <button class="tool-button" type="button" data-mode="line-transmission" title="Draw 100 kV transmission line" aria-label="Draw 100 kV transmission line">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 17L20 7"></path>
-              <path d="M6 17h12"></path>
-              <path d="M12 12v7"></path>
-              <text x="3" y="7">100</text>
-            </svg>
+          <button class="tool-button voltage-tool transmission-tool" type="button" data-mode="line-transmission" data-picker-trigger="transmission" title="Choose a 100 kV line" aria-label="Choose a 100 kV line">
+            <span>100 kV</span>
           </button>
           <div class="tool-separator"></div>
           <button class="tool-button" type="button" id="deleteButton" title="Delete selection" aria-label="Delete selection">
@@ -125,6 +105,49 @@
             </svg>
           </button>
         </aside>
+
+        <div class="placement-popover source-picker" id="sourcePicker" data-picker-panel="source" hidden>
+          <div class="picker-heading">Sources</div>
+          <div class="source-picker-grid">
+            <button class="picker-option" type="button" data-source-type="wind" title="Wind Source" aria-label="Wind Source"><span class="source-preview wind-preview"></span></button>
+            <button class="picker-option" type="button" data-source-type="solar" title="Solar Source" aria-label="Solar Source"><span class="source-preview solar-preview"></span></button>
+            <button class="picker-option" type="button" data-source-type="coal" title="Coal Source" aria-label="Coal Source"><span class="source-preview coal-preview"></span></button>
+            <button class="picker-option" type="button" data-source-type="geothermal" title="Geothermal Source" aria-label="Geothermal Source"><span class="source-preview geothermal-preview"></span></button>
+            <button class="picker-option" type="button" data-source-type="gas" title="Natural Gas Source" aria-label="Natural Gas Source"><span class="source-preview gas-preview"></span></button>
+            <button class="picker-option" type="button" data-source-type="nuclear" title="Nuclear Source" aria-label="Nuclear Source"><span class="source-preview nuclear-preview"></span></button>
+            <button class="picker-option hydro-option" type="button" data-source-type="hydro" title="Hydroelectric Source" aria-label="Hydroelectric Source"><span class="source-preview hydro-preview"></span></button>
+          </div>
+        </div>
+
+        <div class="placement-popover load-picker" id="loadPicker" data-picker-panel="load" hidden>
+          <div class="picker-heading">Loads</div>
+          <div class="load-picker-grid">
+            <button class="picker-option" type="button" data-load-type="general" title="General Load" aria-label="General Load"><span class="load-preview general-load-preview"></span></button>
+            <button class="picker-option" type="button" data-load-type="residential" title="Residential Load" aria-label="Residential Load"><span class="load-preview residential-load-preview"></span></button>
+            <button class="picker-option" type="button" data-load-type="commercial" title="Commercial Load" aria-label="Commercial Load"><span class="load-preview commercial-load-preview"></span></button>
+            <button class="picker-option" type="button" data-load-type="industrial" title="Industrial Load" aria-label="Industrial Load"><span class="load-preview industrial-load-preview"></span></button>
+          </div>
+        </div>
+
+        <div class="placement-popover line-picker distribution-picker" id="distributionPicker" data-picker-panel="distribution" hidden>
+          <div class="picker-heading">10 kV lines</div>
+          <div class="line-picker-grid">
+            <button class="picker-option" type="button" data-line-type="distribution" data-line-variant="thin-1" title="500 A" aria-label="500 A, one thin wire"><span class="wire-preview one thin"></span></button>
+            <button class="picker-option" type="button" data-line-type="distribution" data-line-variant="thin-2" title="1000 A" aria-label="1000 A, two thin wires"><span class="wire-preview two thin"></span></button>
+            <button class="picker-option" type="button" data-line-type="distribution" data-line-variant="thick-1" title="2000 A" aria-label="2000 A, one thick wire"><span class="wire-preview one thick"></span></button>
+            <button class="picker-option" type="button" data-line-type="distribution" data-line-variant="thick-2" title="4000 A" aria-label="4000 A, two thick wires"><span class="wire-preview two thick"></span></button>
+          </div>
+        </div>
+
+        <div class="placement-popover line-picker transmission-picker" id="transmissionPicker" data-picker-panel="transmission" hidden>
+          <div class="picker-heading">100 kV lines</div>
+          <div class="line-picker-grid">
+            <button class="picker-option" type="button" data-line-type="transmission" data-line-variant="thin-1" title="500 A" aria-label="500 A, one thin wire"><span class="wire-preview one thin"></span></button>
+            <button class="picker-option" type="button" data-line-type="transmission" data-line-variant="thin-2" title="1000 A" aria-label="1000 A, two thin wires"><span class="wire-preview two thin"></span></button>
+            <button class="picker-option" type="button" data-line-type="transmission" data-line-variant="thick-1" title="2000 A" aria-label="2000 A, one thick wire"><span class="wire-preview one thick"></span></button>
+            <button class="picker-option" type="button" data-line-type="transmission" data-line-variant="thick-2" title="4000 A" aria-label="4000 A, two thick wires"><span class="wire-preview two thick"></span></button>
+          </div>
+        </div>
 
         <section class="canvas-panel">
           <canvas id="gridCanvas" aria-label="Electrical grid canvas"></canvas>
@@ -155,6 +178,7 @@
       </footer>
     </div>
 
+    <script src="world.js" defer></script>
     <script src="app.js" defer></script>
   </body>
 </html>

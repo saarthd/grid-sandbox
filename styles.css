@@ -11,7 +11,7 @@
   --joint: #7b65c7;
   --load: #2f6fab;
   --battery: #2b9a64;
-  --distribution: #008a80;
+  --distribution: #111820;
   --transmission: #bd3e55;
   --danger: #c73535;
   --warn: #b36a10;
@@ -201,8 +201,9 @@ svg text {
 }
 
 .workspace {
+  position: relative;
   display: grid;
-  grid-template-columns: 68px minmax(0, 1fr) 344px;
+  grid-template-columns: 82px minmax(0, 1fr) 344px;
   min-height: 0;
 }
 
@@ -218,8 +219,8 @@ svg text {
 }
 
 .tool-button {
-  width: 44px;
-  height: 44px;
+  width: 56px;
+  height: 46px;
   color: #33444d;
 }
 
@@ -234,24 +235,106 @@ svg text {
   color: var(--source);
 }
 
-.tool-button[data-mode="joint"] svg {
-  color: var(--joint);
+.tool-button[data-mode="joint"].active {
+  border-color: #765fc8;
+  background: #f0edfb;
 }
 
-.tool-button[data-mode="load"] svg {
-  color: var(--load);
+.tool-button[data-mode="load"].active {
+  border-color: var(--load);
+  background: #edf4fb;
 }
 
-.tool-button[data-mode="battery"] svg {
-  color: var(--battery);
+.tool-button[data-mode="battery"].active {
+  border-color: var(--battery);
+  background: #edf8f2;
 }
 
-.tool-button[data-mode="line-distribution"] svg {
-  color: var(--distribution);
+.tool-button.distribution-tool.active,
+.tool-button.distribution-tool.picker-open {
+  border-color: #111820;
+  background: #111820;
+  color: #fff;
 }
 
-.tool-button[data-mode="line-transmission"] svg {
+.tool-button.transmission-tool.active,
+.tool-button.transmission-tool.picker-open {
+  border-color: var(--transmission);
+  background: var(--transmission);
+  color: #fff;
+}
+
+.tool-button[data-picker-trigger="source"].picker-open {
+  border-color: #c89420;
+  background: #fff5cc;
+  color: #9b6b00;
+}
+
+.tool-button[data-mode="source"].active {
+  border-color: #c89420;
+  background: #fff5cc;
+  color: #9b6b00;
+}
+
+.voltage-tool {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.distribution-tool {
+  color: #111820;
+}
+
+.transmission-tool {
   color: var(--transmission);
+}
+
+.tool-glyph {
+  position: relative;
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+
+.substation-glyph {
+  background: var(--joint);
+  clip-path: polygon(25% 7%, 75% 7%, 100% 50%, 75% 93%, 25% 93%, 0 50%);
+}
+
+.substation-glyph::after {
+  position: absolute;
+  inset: 2px;
+  background: #fff;
+  clip-path: inherit;
+  content: "";
+}
+
+.pole-glyph {
+  border: 2px solid #6b3a12;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.tower-glyph {
+  border: 2px solid #aeb8bf;
+  background:
+    linear-gradient(45deg, transparent 46%, #aeb8bf 47%, #aeb8bf 53%, transparent 54%),
+    linear-gradient(-45deg, transparent 46%, #aeb8bf 47%, #aeb8bf 53%, transparent 54%),
+    #fff;
+}
+
+.load-glyph {
+  border: 2px solid var(--load);
+  background: #fff;
+}
+
+.battery-glyph {
+  width: 26px;
+  height: 16px;
+  border: 2px solid var(--battery);
+  background: #fff;
 }
 
 .tool-separator {
@@ -259,6 +342,197 @@ svg text {
   height: 1px;
   margin: 2px 0;
   background: var(--line);
+}
+
+.placement-popover {
+  position: absolute;
+  top: 12px;
+  left: 92px;
+  z-index: 6;
+  width: 214px;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: var(--shadow);
+}
+
+.placement-popover[hidden] {
+  display: none;
+}
+
+.picker-heading {
+  margin: 0 0 9px;
+  color: #34434b;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.source-picker-grid,
+.load-picker-grid,
+.line-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.picker-option {
+  display: grid;
+  min-width: 0;
+  height: 58px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.picker-option:hover,
+.picker-option.active {
+  border-color: #126f67;
+  box-shadow: inset 0 0 0 1px rgba(18, 111, 103, 0.18);
+}
+
+.source-picker .picker-option,
+.load-picker .picker-option {
+  background: #34434b;
+}
+
+.load-preview {
+  display: block;
+  border: 2px solid #fff;
+}
+
+.general-load-preview {
+  width: 25px;
+  height: 25px;
+  background: #2f6fab;
+}
+
+.residential-load-preview {
+  width: 21px;
+  height: 21px;
+  background: #66a7d5;
+}
+
+.commercial-load-preview {
+  width: 25px;
+  height: 29px;
+  background: #2f6fab;
+}
+
+.industrial-load-preview {
+  width: 31px;
+  height: 20px;
+  background: rgb(80, 90, 140);
+}
+
+.source-preview {
+  display: block;
+  border: 2px solid #fff;
+  background: #f1c84a;
+}
+
+.wind-preview {
+  width: 28px;
+  height: 25px;
+  border: 0;
+  background: #f7df79;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  filter: drop-shadow(1px 0 0 #fff) drop-shadow(-1px 0 0 #fff) drop-shadow(0 1px 0 #fff) drop-shadow(0 -1px 0 #fff);
+}
+
+.solar-preview {
+  width: 29px;
+  height: 29px;
+  background: #f4c542;
+}
+
+.coal-preview {
+  width: 29px;
+  height: 29px;
+  border-radius: 50%;
+  background: rgb(160, 100, 0);
+}
+
+.geothermal-preview {
+  width: 29px;
+  height: 29px;
+  border-radius: 7px;
+  background: rgb(220, 230, 0);
+}
+
+.gas-preview {
+  width: 31px;
+  height: 31px;
+  border-radius: 50%;
+  background: rgb(160, 140, 0);
+}
+
+.nuclear-preview {
+  width: 31px;
+  height: 31px;
+  border-radius: 50%;
+  background: #f0cf28;
+}
+
+.hydro-option {
+  grid-column: 1 / -1;
+}
+
+.hydro-preview {
+  width: 45px;
+  height: 18px;
+  background: rgb(190, 180, 140);
+}
+
+.line-picker-grid .picker-option {
+  height: 48px;
+}
+
+.wire-preview {
+  position: relative;
+  display: block;
+  width: 58px;
+  height: 24px;
+  color: #111820;
+}
+
+.transmission-picker .wire-preview {
+  color: var(--transmission);
+}
+
+.wire-preview::before,
+.wire-preview.two::after {
+  position: absolute;
+  right: 2px;
+  left: 2px;
+  top: 50%;
+  height: 1px;
+  background: currentColor;
+  content: "";
+  transform: translateY(-50%);
+}
+
+.wire-preview.thick::before,
+.wire-preview.two.thick::after {
+  height: 4px;
+}
+
+.wire-preview.two::before {
+  top: 36%;
+}
+
+.wire-preview.two::after {
+  top: 64%;
+}
+
+.transmission-picker .wire-preview.two::before {
+  top: 25%;
+}
+
+.transmission-picker .wire-preview.two::after {
+  top: 75%;
 }
 
 .canvas-panel {
@@ -631,7 +905,7 @@ input[type="range"] {
 
 @media (max-width: 980px) {
   .workspace {
-    grid-template-columns: 58px minmax(0, 1fr);
+    grid-template-columns: 70px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) 280px;
   }
 
@@ -643,6 +917,10 @@ input[type="range"] {
 
   .toolrail {
     padding-inline: 7px;
+  }
+
+  .placement-popover {
+    left: 78px;
   }
 }
 
@@ -681,6 +959,16 @@ input[type="range"] {
     overflow-x: auto;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .tool-button {
+    flex: 0 0 52px;
+    width: 52px;
+  }
+
+  .placement-popover {
+    top: 70px;
+    left: 10px;
   }
 
   .tool-separator {

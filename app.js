@@ -2,7 +2,10 @@
   "use strict";
 
   const canvas = document.getElementById("gridCanvas");
-  const ctx = canvas.getContext("2d");
+  let ctx = canvas.getContext("2d");
+  const networkLayerCanvas = document.createElement("canvas");
+  const networkLayerContext = networkLayerCanvas.getContext("2d");
+  let networkLayerValid = false;
   const propertiesEl = document.getElementById("properties");
   const runButton = document.getElementById("runButton");
   const timeReadout = document.getElementById("timeReadout");
@@ -21,20 +24,22 @@
   const solveBadge = document.getElementById("solveBadge");
 
   const CLICK_RADIUS_M = 5;
-  const SOURCE_RADIUS_M = 12;
-  const JOINT_RADIUS_M = 10;
-  const BATTERY_WIDTH_M = 18;
-  const BATTERY_HEIGHT_M = 10;
   const POLE_RADIUS_M = 1.6;
   const TOWER_SIZE_M = 8;
+  const WATER_SURFACE_COLOR = "#65899d";
   const DEFAULT_LINE_VARIANT = "thin-2";
   const BASE_VOLTAGE = 10000;
   const TRANSMISSION_RATIO = 10;
   const SIMULATION_STEP_SECONDS = 1;
-  const VARIABLE_UPDATE_SECONDS = 10;
+  const BASE_VARIABLE_UPDATE_SECONDS = 10;
   const DEFAULT_VARIABILITY_INDEX = 5;
   const DEFAULT_BATTERY_CAPACITY_GJ = 100;
   const DEFAULT_BATTERY_RATE_MW = 10;
+  const MIN_POWER_KW = 1;
+  const LOAD_POWER_CAP_KW = 10000;
+  const DEFAULT_SUBSTATION_MAX_STEP_KW = 20000;
+  const MIN_SUBSTATION_MAX_STEP_KW = 1000;
+  const SUBSTATION_MAX_STEP_KW = 80000;
   const MAX_ZOOM = 4;
   const MIN_ZOOM = 0.22;
 
@@ -43,6 +48,156 @@
     "thin-2": { label: "2x thin wire", currentLimitA: 1000, wireCount: 2, thicknessM: 0.45 },
     "thick-1": { label: "1x thick wire", currentLimitA: 2000, wireCount: 1, thicknessM: 1.05 },
     "thick-2": { label: "2x thick wire", currentLimitA: 4000, wireCount: 2, thicknessM: 1.05 }
+  };
+
+  const BATTERY_SIZE_TIERS = [
+    { maximumGJ: 50, width: 10, height: 20 },
+    { maximumGJ: 150, width: 15, height: 25 },
+    { maximumGJ: 350, width: 20, height: 30 },
+    { maximumGJ: 650, width: 20, height: 40 },
+    { maximumGJ: 1000, width: 30, height: 50 }
+  ];
+
+  const SOURCE_TYPES = {
+    wind: {
+      label: "Wind",
+      profile: "variable",
+      frequency: 6,
+      capKw: 30000,
+      fill: "#f7df79",
+      shape: "triangle",
+      defaultMinKw: 1000,
+      defaultMaxKw: 5000,
+      defaultPowerKw: 3000,
+      sizes: [{ below: 3000, w: 10, h: 10 }, { below: 10000, w: 15, h: 15 }, { below: 20000, w: 20, h: 20 }, { below: Infinity, w: 30, h: 30 }]
+    },
+    solar: {
+      label: "Solar",
+      profile: "variable",
+      frequency: 4,
+      capKw: 40000,
+      fill: "#f4c542",
+      shape: "square",
+      defaultMinKw: 500,
+      defaultMaxKw: 5000,
+      defaultPowerKw: 2500,
+      sizes: [{ below: 1000, w: 20, h: 20 }, { below: 6000, w: 30, h: 30 }, { below: 12000, w: 40, h: 40 }, { below: 24000, w: 50, h: 50 }, { below: Infinity, w: 60, h: 60 }]
+    },
+    coal: {
+      label: "Coal",
+      profile: "constant",
+      frequency: DEFAULT_VARIABILITY_INDEX,
+      capKw: 50000,
+      fill: "rgb(160, 100, 0)",
+      shape: "circle",
+      defaultMinKw: 5000,
+      defaultMaxKw: 25000,
+      defaultPowerKw: 15000,
+      sizes: [{ below: 1000, w: 15, h: 15 }, { below: 5000, w: 20, h: 20 }, { below: 10000, w: 25, h: 25 }, { below: 20000, w: 30, h: 30 }, { below: 35000, w: 35, h: 35 }, { below: Infinity, w: 40, h: 40 }]
+    },
+    geothermal: {
+      label: "Geothermal",
+      profile: "variable",
+      frequency: 2,
+      capKw: 60000,
+      fill: "rgb(220, 230, 0)",
+      shape: "rounded-square",
+      defaultMinKw: 5000,
+      defaultMaxKw: 25000,
+      defaultPowerKw: 15000,
+      sizes: [{ below: 1000, w: 10, h: 10 }, { below: 10000, w: 15, h: 15 }, { below: 20000, w: 20, h: 20 }, { below: 35000, w: 25, h: 25 }, { below: Infinity, w: 30, h: 30 }]
+    },
+    gas: {
+      label: "Natural Gas",
+      profile: "constant",
+      frequency: DEFAULT_VARIABILITY_INDEX,
+      capKw: 70000,
+      fill: "rgb(160, 140, 0)",
+      shape: "circle",
+      defaultMinKw: 5000,
+      defaultMaxKw: 30000,
+      defaultPowerKw: 17500,
+      sizes: [{ below: 1000, w: 15, h: 15 }, { below: 5000, w: 20, h: 20 }, { below: 10000, w: 25, h: 25 }, { below: 20000, w: 30, h: 30 }, { below: 35000, w: 35, h: 35 }, { below: 50000, w: 40, h: 40 }, { below: Infinity, w: 50, h: 50 }]
+    },
+    nuclear: {
+      label: "Nuclear",
+      profile: "constant",
+      frequency: DEFAULT_VARIABILITY_INDEX,
+      capKw: 80000,
+      fill: "#f0cf28",
+      shape: "circle",
+      defaultMinKw: 10000,
+      defaultMaxKw: 40000,
+      defaultPowerKw: 25000,
+      sizes: [{ below: 1000, w: 15, h: 15 }, { below: 10000, w: 20, h: 20 }, { below: 30000, w: 30, h: 30 }, { below: 50000, w: 40, h: 40 }, { below: Infinity, w: 50, h: 50 }]
+    },
+    hydro: {
+      label: "Hydroelectric",
+      profile: "constant",
+      frequency: DEFAULT_VARIABILITY_INDEX,
+      capKw: 100000,
+      fill: "rgb(190, 180, 140)",
+      shape: "rectangle",
+      defaultMinKw: 10000,
+      defaultMaxKw: 50000,
+      defaultPowerKw: 30000,
+      sizes: [{ below: 1000, w: 20, h: 5 }, { below: 10000, w: 30, h: 10 }, { below: 25000, w: 40, h: 10 }, { below: 50000, w: 50, h: 15 }, { below: 75000, w: 60, h: 15 }, { below: Infinity, w: 80, h: 20 }]
+    },
+    generic: {
+      label: "Legacy",
+      profile: null,
+      frequency: DEFAULT_VARIABILITY_INDEX,
+      capKw: 100000,
+      fill: "#e7a52d",
+      shape: "circle",
+      defaultMinKw: 1,
+      defaultMaxKw: 10000,
+      defaultPowerKw: 7500,
+      sizes: [{ below: Infinity, w: 24, h: 24 }]
+    }
+  };
+
+  const LOAD_TYPES = {
+    general: {
+      label: "General",
+      capKw: LOAD_POWER_CAP_KW,
+      fill: "#2f6fab",
+      zone: "",
+      defaultMinKw: 500,
+      defaultMaxKw: LOAD_POWER_CAP_KW,
+      defaultPowerKw: 3000,
+      sizes: [{ below: 100, w: 5, h: 5 }, { below: 1000, w: 10, h: 10 }, { below: Infinity, w: 20, h: 20 }]
+    },
+    residential: {
+      label: "Residential",
+      capKw: LOAD_POWER_CAP_KW,
+      fill: "#66a7d5",
+      zone: "residential",
+      defaultMinKw: 500,
+      defaultMaxKw: LOAD_POWER_CAP_KW,
+      defaultPowerKw: 3000,
+      sizes: [{ below: 100, w: 5, h: 5 }, { below: 1000, w: 10, h: 10 }, { below: Infinity, w: 20, h: 20 }]
+    },
+    commercial: {
+      label: "Commercial",
+      capKw: 20000,
+      fill: "#2f6fab",
+      zone: "commercial",
+      defaultMinKw: 500,
+      defaultMaxKw: 10000,
+      defaultPowerKw: 4000,
+      sizes: [{ below: 1000, w: 10, h: 10 }, { below: 5000, w: 20, h: 20 }, { below: 10000, w: 20, h: 30 }, { below: 15000, w: 30, h: 30 }, { below: Infinity, w: 30, h: 40 }]
+    },
+    industrial: {
+      label: "Industrial",
+      capKw: 30000,
+      fill: "rgb(80, 90, 140)",
+      zone: "industrial",
+      defaultMinKw: 500,
+      defaultMaxKw: 15000,
+      defaultPowerKw: 6000,
+      sizes: [{ below: 1000, w: 10, h: 20 }, { below: 10000, w: 20, h: 30 }, { below: 20000, w: 20, h: 40 }, { below: Infinity, w: 30, h: 50 }]
+    }
   };
 
   const VARIABLE_CHANGE_OPTIONS = [-10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -137,21 +292,60 @@
     errors: [],
     lastTripCount: 0,
     nodeClipboard: null,
+    worldSeed: window.GridboxWorld.randomSeed(),
+    zoneOverlay: null,
     placement: {
+      sourceType: "wind",
+      sourceRotation: 0,
+      loadType: "general",
+      loadRotation: 0,
       jointType: "joint",
       distributionVariant: DEFAULT_LINE_VARIANT,
       transmissionVariant: DEFAULT_LINE_VARIANT
     }
   };
 
-  function nodeDefaults(type, x, y) {
+  let world = window.GridboxWorld.create(state.worldSeed);
+
+  function resetWorld(seed) {
+    if (Number.isFinite(Number(seed))) {
+      state.worldSeed = Math.floor(Number(seed)) >>> 0;
+      world = window.GridboxWorld.create(state.worldSeed);
+      return;
+    }
+    let candidateSeed = window.GridboxWorld.randomSeed();
+    let candidateWorld = window.GridboxWorld.create(candidateSeed);
+    for (let attempt = 0; attempt < 18; attempt += 1) {
+      let landSamples = 0;
+      for (let sampleX = -500; sampleX <= 500; sampleX += 250) {
+        for (let sampleY = -350; sampleY <= 350; sampleY += 175) {
+          if (!candidateWorld.isWater(sampleX, sampleY)) landSamples += 1;
+        }
+      }
+      if (landSamples >= 17) break;
+      candidateSeed = window.GridboxWorld.randomSeed();
+      candidateWorld = window.GridboxWorld.create(candidateSeed);
+    }
+    state.worldSeed = candidateSeed;
+    world = candidateWorld;
+  }
+
+  function nodeDefaults(type, x, y, requestedSourceType, requestedLoadType) {
     const id = state.nextNodeId++;
+    const sourceType = type === "source" && SOURCE_TYPES[requestedSourceType || state.placement.sourceType]
+      ? requestedSourceType || state.placement.sourceType
+      : "generic";
+    const sourceConfig = SOURCE_TYPES[sourceType];
+    const loadType = type === "load" && LOAD_TYPES[requestedLoadType || state.placement.loadType]
+      ? requestedLoadType || state.placement.loadType
+      : "general";
+    const loadConfig = LOAD_TYPES[loadType];
     const labels = {
-      source: "Source",
+      source: `${sourceConfig.label} Source`,
       joint: "Substation",
       pole: "Pole",
       tower: "Tower",
-      load: "Load",
+      load: `${loadConfig.label} Load`,
       battery: "Battery"
     };
 
@@ -162,10 +356,15 @@
       display: type === "joint" ? `S${id % 10}` : "",
       x,
       y,
-      powerKw: type === "source" ? 7500 : type === "load" ? 3000 : 0,
-      maxPowerKw: type === "source" ? 10000 : type === "load" ? 10000 : 0,
-      powerProfile: "constant",
-      variabilityIndex: DEFAULT_VARIABILITY_INDEX,
+      powerKw: type === "source" ? sourceConfig.defaultPowerKw : type === "load" ? loadConfig.defaultPowerKw : 0,
+      minPowerKw: type === "source" ? sourceConfig.defaultMinKw : type === "load" ? loadConfig.defaultMinKw : 0,
+      maxPowerKw: type === "source" ? sourceConfig.defaultMaxKw : type === "load" ? loadConfig.defaultMaxKw : 0,
+      powerProfile: type === "source" && sourceConfig.profile ? sourceConfig.profile : "constant",
+      variabilityIndex: type === "source" ? sourceConfig.frequency : DEFAULT_VARIABILITY_INDEX,
+      sourceType: type === "source" ? sourceType : "",
+      sourceRotation: type === "source" && sourceType === "hydro" ? state.placement.sourceRotation : 0,
+      loadType: type === "load" ? loadType : "",
+      loadRotation: type === "load" ? state.placement.loadRotation : 0,
       variationPhase: Math.random() * TWO_PI,
       variationDeviation: 0,
       variationDeviationTrend: (Math.random() - 0.5) * 0.02,
@@ -175,6 +374,8 @@
       batteryCapacityGJ: type === "battery" ? DEFAULT_BATTERY_CAPACITY_GJ : 0,
       batteryEnergyGJ: type === "battery" ? DEFAULT_BATTERY_CAPACITY_GJ / 2 : 0,
       batteryRateMw: type === "battery" ? DEFAULT_BATTERY_RATE_MW : 0,
+      maxStepPowerKw: type === "joint" ? DEFAULT_SUBSTATION_MAX_STEP_KW : 0,
+      steppedPowerKw: 0,
       lineNetKw: 0,
       curtailedKw: 0,
       unservedKw: 0,
@@ -207,6 +408,7 @@
       node.voltage = BASE_VOLTAGE;
       node.effectivePowerKw = 0;
       node.batteryPowerKw = 0;
+      node.steppedPowerKw = 0;
       node.lineNetKw = 0;
       node.curtailedKw = 0;
       node.unservedKw = 0;
@@ -274,6 +476,10 @@
     document.querySelectorAll(".tool-button[data-mode]").forEach((button) => {
       button.disabled = state.running && button.dataset.mode !== "select";
     });
+    document.querySelectorAll(".picker-option").forEach((button) => {
+      button.disabled = state.running;
+    });
+    if (state.running) closePlacementPickers();
     deleteButton.disabled = state.running;
   }
 
@@ -282,7 +488,7 @@
       stopSimulation("Stopped");
       return;
     }
-    enforceVariablePowerBounds();
+    enforcePowerBounds();
     state.running = true;
     state.simulationNeedsSolve = true;
     state.elapsedSeconds = Math.max(0, Math.floor(Number(state.elapsedSeconds) || 0));
@@ -307,12 +513,37 @@
     if (shouldRender) renderAll();
   }
 
+  let indexedNodes = null;
+  let indexedNodeCount = -1;
+  let nodeById = new Map();
+  let indexedLines = null;
+  let indexedLineCount = -1;
+  let lineById = new Map();
+
+  function currentNodeIndex() {
+    if (indexedNodes !== state.nodes || indexedNodeCount !== state.nodes.length) {
+      indexedNodes = state.nodes;
+      indexedNodeCount = state.nodes.length;
+      nodeById = new Map(state.nodes.map((node) => [node.id, node]));
+    }
+    return nodeById;
+  }
+
+  function currentLineIndex() {
+    if (indexedLines !== state.lines || indexedLineCount !== state.lines.length) {
+      indexedLines = state.lines;
+      indexedLineCount = state.lines.length;
+      lineById = new Map(state.lines.map((line) => [line.id, line]));
+    }
+    return lineById;
+  }
+
   function getNode(id) {
-    return state.nodes.find((node) => node.id === id);
+    return currentNodeIndex().get(id);
   }
 
   function getLine(id) {
-    return state.lines.find((line) => line.id === id);
+    return currentLineIndex().get(id);
   }
 
   function nodeColor(type) {
@@ -340,15 +571,6 @@
       const active = value === selected ? " selected" : "";
       return `<option value="${value}"${active}>${variant.label} (${variant.currentLimitA} A)</option>`;
     }).join("");
-  }
-
-  function jointTypeOptions(selected) {
-    const options = [
-      ["joint", "Substation"],
-      ["pole", "Pole"],
-      ["tower", "Tower"]
-    ];
-    return options.map(([value, label]) => `<option value="${value}"${value === selected ? " selected" : ""}>${label}</option>`).join("");
   }
 
   function jointTypeLabel(value) {
@@ -510,6 +732,18 @@
     return `${mw.toLocaleString(undefined, { maximumFractionDigits: mw >= 10 ? 0 : 1 })} MW`;
   }
 
+  function substationMaxStepKw(node) {
+    return clamp(Number(node && node.maxStepPowerKw) || DEFAULT_SUBSTATION_MAX_STEP_KW, MIN_SUBSTATION_MAX_STEP_KW, SUBSTATION_MAX_STEP_KW);
+  }
+
+  function substationSizeM(node) {
+    const maximumKw = substationMaxStepKw(node);
+    if (maximumKw <= 10000) return 10;
+    if (maximumKw <= 20000) return 20;
+    if (maximumKw <= 50000) return 30;
+    return 40;
+  }
+
   function formatPercent(value) {
     return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}%`;
   }
@@ -527,29 +761,153 @@
     return ["variable", "varying", "automatic", "auto"].includes(key) ? "variable" : "constant";
   }
 
+  function normalizeSourceType(value, node) {
+    const aliases = {
+      wind: "wind",
+      solar: "solar",
+      coal: "coal",
+      geothermal: "geothermal",
+      gas: "gas",
+      "natural gas": "gas",
+      naturalgas: "gas",
+      nuclear: "nuclear",
+      hydro: "hydro",
+      hydroelectric: "hydro",
+      legacy: "generic",
+      generic: "generic"
+    };
+    const explicit = aliases[normalizeKey(value)];
+    if (explicit) return explicit;
+    const name = normalizeKey(node && node.name);
+    if (name.includes("wind")) return "wind";
+    if (name.includes("solar")) return "solar";
+    if (name.includes("coal")) return "coal";
+    if (name.includes("geothermal")) return "geothermal";
+    if (name.includes("natural gas") || name.includes("gas")) return "gas";
+    if (name.includes("nuclear")) return "nuclear";
+    if (name.includes("hydro")) return "hydro";
+    return "generic";
+  }
+
+  function normalizeLoadType(value, node) {
+    const aliases = {
+      general: "general",
+      generic: "general",
+      legacy: "general",
+      residential: "residential",
+      home: "residential",
+      commercial: "commercial",
+      business: "commercial",
+      industrial: "industrial",
+      industry: "industrial"
+    };
+    const explicit = aliases[normalizeKey(value)];
+    if (explicit) return explicit;
+    return "general";
+  }
+
+  function sourceConfig(nodeOrType) {
+    const type = typeof nodeOrType === "string" ? normalizeSourceType(nodeOrType) : normalizeSourceType(nodeOrType && nodeOrType.sourceType, nodeOrType);
+    return SOURCE_TYPES[type] || SOURCE_TYPES.generic;
+  }
+
+  function sourceTypeLabel(node) {
+    return `${sourceConfig(node).label} Source`;
+  }
+
+  function loadConfig(nodeOrType) {
+    const type = typeof nodeOrType === "string" ? normalizeLoadType(nodeOrType) : normalizeLoadType(nodeOrType && nodeOrType.loadType, nodeOrType);
+    return LOAD_TYPES[type] || LOAD_TYPES.general;
+  }
+
+  function loadTypeLabel(node) {
+    return `${loadConfig(node).label} Load`;
+  }
+
+  function sourceProfileLocked(node) {
+    return Boolean(node && node.type === "source" && sourceConfig(node).profile);
+  }
+
+  function applyFixedSourceBehavior(node) {
+    if (!node || node.type !== "source") return;
+    const config = sourceConfig(node);
+    if (config.profile) node.powerProfile = config.profile;
+    if (config.profile === "variable") node.variabilityIndex = config.frequency;
+  }
+
+  function nodePowerCapKw(node) {
+    if (node && node.type === "source") return sourceConfig(node).capKw;
+    return node && node.type === "load" ? loadConfig(node).capKw : 0;
+  }
+
+  function powerRangeFloorKw(node) {
+    return node && node.type === "source" ? 0 : MIN_POWER_KW;
+  }
+
+  function powerRangeValue(value, fallback) {
+    if (value == null || value === "") return fallback;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+  }
+
   function variabilityIndex(node) {
     return clamp(Math.round(Number(node.variabilityIndex) || DEFAULT_VARIABILITY_INDEX), 1, 10);
   }
 
-  function variablePowerMinimumKw(node) {
-    if (!node || !["source", "load"].includes(node.type) || node.powerProfile !== "variable") return 0;
-    return Math.max(0, Number(node.maxPowerKw) || 0) * 0.2;
+  function powerRangeMinimumKw(node) {
+    if (!node || !["source", "load"].includes(node.type)) return 0;
+    const floor = powerRangeFloorKw(node);
+    return clamp(powerRangeValue(node.minPowerKw, floor), floor, Math.max(floor, powerRangeMaximumKw(node) - 1));
   }
 
-  function variablePowerMaximumKw(node) {
-    const maximum = Math.max(0, Number(node && node.maxPowerKw) || 0);
-    if (!node || !["source", "load"].includes(node.type) || node.powerProfile !== "variable") return maximum;
-    return maximum * 0.9;
+  function powerRangeMaximumKw(node) {
+    if (!node || !["source", "load"].includes(node.type)) return 0;
+    const cap = nodePowerCapKw(node);
+    const floor = powerRangeFloorKw(node);
+    return clamp(powerRangeValue(node.maxPowerKw, Math.min(1000, cap)), floor + 1, cap);
+  }
+
+  function sourceYieldFactor(node) {
+    if (!node || node.type !== "source" || !["wind", "solar", "geothermal"].includes(node.sourceType)) return 1;
+    const size = sourceVisualDimensions(node);
+    return world.yieldFactor(node.sourceType, node.x, node.y, size.width, size.height);
+  }
+
+  function operatingPowerMinimumKw(node) {
+    return powerRangeMinimumKw(node) * sourceYieldFactor(node);
+  }
+
+  function operatingPowerMaximumKw(node) {
+    return powerRangeMaximumKw(node) * sourceYieldFactor(node);
+  }
+
+  function setNodePowerRange(node, requestedMin, requestedMax, changedSide = "both") {
+    if (!node || !["source", "load"].includes(node.type)) return;
+    const cap = nodePowerCapKw(node);
+    const floor = powerRangeFloorKw(node);
+    let minimum;
+    let maximum;
+    if (changedSide === "min") {
+      minimum = clamp(powerRangeValue(requestedMin, floor), floor, cap - 1);
+      maximum = clamp(powerRangeValue(requestedMax, minimum + 1), minimum + 1, cap);
+    } else {
+      maximum = clamp(powerRangeValue(requestedMax, floor + 1), floor + 1, cap);
+      minimum = clamp(powerRangeValue(requestedMin, floor), floor, maximum - 1);
+    }
+    node.minPowerKw = minimum;
+    node.maxPowerKw = maximum;
+    node.powerKw = clampNodePower(node, node.powerKw);
   }
 
   function clampNodePower(node, value) {
-    const maximum = variablePowerMaximumKw(node);
-    return clamp(Number(value) || 0, variablePowerMinimumKw(node), maximum);
+    return clamp(Number(value) || 0, operatingPowerMinimumKw(node), operatingPowerMaximumKw(node));
   }
 
-  function enforceVariablePowerBounds() {
+  function enforcePowerBounds() {
     state.nodes.forEach((node) => {
-      if (!["source", "load"].includes(node.type) || node.powerProfile !== "variable") return;
+      if (!["source", "load"].includes(node.type)) return;
+      applyFixedSourceBehavior(node);
+      setNodePowerRange(node, node.minPowerKw, node.maxPowerKw);
       node.powerKw = clampNodePower(node, node.powerKw);
     });
   }
@@ -579,36 +937,94 @@
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(rect.width * dpr));
     canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    networkLayerCanvas.width = canvas.width;
+    networkLayerCanvas.height = canvas.height;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    networkLayerContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    networkLayerValid = false;
     draw();
   }
 
+  function closePlacementPickers() {
+    document.querySelectorAll("[data-picker-panel]").forEach((panel) => {
+      panel.hidden = true;
+    });
+    document.querySelectorAll("[data-picker-trigger]").forEach((button) => {
+      button.classList.remove("picker-open");
+    });
+  }
+
+  function openPlacementPicker(name) {
+    if (state.running) {
+      setCanvasStatus("Stop the run to choose placement tools");
+      return;
+    }
+    const panel = document.querySelector(`[data-picker-panel="${name}"]`);
+    const trigger = document.querySelector(`[data-picker-trigger="${name}"]`);
+    const wasOpen = panel && !panel.hidden;
+    const previousOverlay = state.zoneOverlay;
+    closePlacementPickers();
+    state.zoneOverlay = !wasOpen && ["source", "load"].includes(name) ? name : null;
+    if (!panel || wasOpen) {
+      if (previousOverlay !== state.zoneOverlay) draw({ reuseNetwork: true });
+      return;
+    }
+    panel.hidden = false;
+    if (trigger) trigger.classList.add("picker-open");
+    if (previousOverlay !== state.zoneOverlay || state.zoneOverlay) draw({ reuseNetwork: true });
+  }
+
+  function updatePlacementControlState() {
+    document.querySelectorAll(".tool-button[data-mode]").forEach((button) => {
+      let active = button.dataset.mode === state.mode;
+      if (button.dataset.jointType) active = active && button.dataset.jointType === state.placement.jointType;
+      button.classList.toggle("active", active);
+    });
+    document.querySelectorAll("[data-picker-panel] [data-source-type]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.sourceType === state.placement.sourceType);
+    });
+    document.querySelectorAll("[data-picker-panel] [data-load-type]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.loadType === state.placement.loadType);
+    });
+    document.querySelectorAll("[data-picker-panel] [data-line-variant]").forEach((button) => {
+      const selected = button.dataset.lineType === "transmission"
+        ? state.placement.transmissionVariant
+        : state.placement.distributionVariant;
+      button.classList.toggle("active", button.dataset.lineVariant === selected);
+    });
+  }
+
   function setMode(mode) {
+    const previousOverlay = state.zoneOverlay;
+    const hadConnection = Boolean(state.connecting);
     if (state.running && mode !== "select") {
       state.mode = "select";
       state.connecting = null;
+      state.zoneOverlay = null;
+      closePlacementPickers();
       setCanvasStatus("Stop the run to edit the grid layout");
-      document.querySelectorAll(".tool-button[data-mode]").forEach((button) => {
-        button.classList.toggle("active", button.dataset.mode === "select");
-      });
+      updatePlacementControlState();
+      if (previousOverlay !== state.zoneOverlay || hadConnection) draw({ reuseNetwork: true });
       return;
     }
     state.mode = mode;
     state.connecting = null;
-    document.querySelectorAll(".tool-button[data-mode]").forEach((button) => {
-      button.classList.toggle("active", button.dataset.mode === mode);
-    });
+    state.zoneOverlay = ["source", "load"].includes(mode) ? mode : null;
+    closePlacementPickers();
+    updatePlacementControlState();
     const messages = {
       select: "Select",
-      source: "Add source",
+      source: `Add ${SOURCE_TYPES[state.placement.sourceType].label} Source`,
       joint: `Add ${jointTypeLabel(state.placement.jointType)}`,
-      load: "Add load",
+      load: `Add ${LOAD_TYPES[state.placement.loadType].label} Load`,
       battery: "Add battery",
       "line-distribution": `Draw 10 kV ${lineVariant({ variant: state.placement.distributionVariant }).label}`,
       "line-transmission": `Draw 100 kV ${lineVariant({ variant: state.placement.transmissionVariant }).label}`
     };
     setCanvasStatus(messages[mode] || "Ready");
-    draw();
+    if (previousOverlay !== state.zoneOverlay || state.zoneOverlay || hadConnection) {
+      draw({ reuseNetwork: true });
+    }
   }
 
   function selectionKey(item) {
@@ -727,6 +1143,26 @@
     return "";
   }
 
+  function nodePlacementDimensions(node) {
+    if (node.type === "source") return sourceVisualDimensions(node);
+    if (node.type === "load") return loadVisualDimensions(node);
+    return { width: 0, height: 0 };
+  }
+
+  function validateNodePlacement(node) {
+    const size = nodePlacementDimensions(node);
+    if (node.type === "source" && node.sourceType === "hydro" && !world.touches("river", node.x, node.y, size.width, size.height)) {
+      return "Hydroelectric sources must touch a river";
+    }
+    if (node.type === "load") {
+      const config = loadConfig(node);
+      if (config.zone && !world.touches(config.zone, node.x, node.y, size.width, size.height)) {
+        return `${config.label} loads must touch a ${config.label.toLowerCase()} zone`;
+      }
+    }
+    return "";
+  }
+
   function addNode(type, point) {
     if (state.running) {
       setCanvasStatus("Stop the run to add nodes");
@@ -734,6 +1170,12 @@
     }
     const actualType = type === "joint" ? state.placement.jointType : type;
     const node = nodeDefaults(actualType, snap(point.x), snap(point.y));
+    node.powerKw = clampNodePower(node, node.powerKw);
+    const placementError = validateNodePlacement(node);
+    if (placementError) {
+      setCanvasStatus(placementError);
+      return;
+    }
     state.nodes.push(node);
     selectItem("node", node.id);
     setDirty(`${node.name} added`);
@@ -795,12 +1237,18 @@
       x: node.x,
       y: node.y,
       powerKw: node.powerKw || 0,
+      minPowerKw: node.minPowerKw || 0,
       maxPowerKw: node.maxPowerKw || 0,
       powerProfile: node.powerProfile || "constant",
       variabilityIndex: variabilityIndex(node),
+      sourceType: node.sourceType || "",
+      sourceRotation: node.sourceRotation || 0,
+      loadType: node.loadType || "",
+      loadRotation: node.loadRotation || 0,
       batteryCapacityGJ: node.batteryCapacityGJ || 0,
       batteryEnergyGJ: node.batteryEnergyGJ || 0,
-      batteryRateMw: node.batteryRateMw || 0
+      batteryRateMw: node.batteryRateMw || 0,
+      maxStepPowerKw: node.maxStepPowerKw || 0
     };
     setCanvasStatus(`${node.name} copied`);
     renderProperties();
@@ -817,17 +1265,28 @@
     }
     const copied = state.nodeClipboard;
     const anchor = selectedNode() || copied;
-    const node = nodeDefaults(copied.type, snap(anchor.x + 30), snap(anchor.y + 30));
+    const node = nodeDefaults(copied.type, snap(anchor.x + 30), snap(anchor.y + 30), copied.sourceType, copied.loadType);
     node.name = uniqueNodeName(`${copied.name} copy`);
     node.display = copied.type === "joint" ? String(copied.display || copied.name).slice(0, 2).toUpperCase() : "";
     node.powerKw = Number(copied.powerKw) || 0;
+    node.minPowerKw = Number(copied.minPowerKw) || 0;
     node.maxPowerKw = Number(copied.maxPowerKw) || 0;
     node.powerProfile = normalizePowerProfile(copied.powerProfile);
     node.variabilityIndex = clamp(Math.round(Number(copied.variabilityIndex) || DEFAULT_VARIABILITY_INDEX), 1, 10);
+    node.sourceType = copied.sourceType || "";
+    node.sourceRotation = Number(copied.sourceRotation) === 90 ? 90 : 0;
+    node.loadType = copied.loadType || "";
+    node.loadRotation = Number(copied.loadRotation) === 90 ? 90 : 0;
     node.batteryCapacityGJ = Number(copied.batteryCapacityGJ) || 0;
     node.batteryEnergyGJ = Number(copied.batteryEnergyGJ) || 0;
     node.batteryRateMw = Number(copied.batteryRateMw) || 0;
+    node.maxStepPowerKw = Number(copied.maxStepPowerKw) || 0;
     normalizeNode(node);
+    const placementError = validateNodePlacement(node);
+    if (placementError) {
+      setCanvasStatus(`${placementError}; paste cancelled`);
+      return;
+    }
     state.nodes.push(node);
     setSelection([{ type: "node", id: node.id }], false);
     setDirty(`${node.name} pasted`);
@@ -844,6 +1303,36 @@
   function isTextEditingTarget(target) {
     if (!target) return false;
     return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
+  }
+
+  function rotatePlaceableNodes() {
+    if (state.running) return;
+    const rotatableNodes = selectedNodes().filter((node) => {
+      if (node.type === "source") return node.sourceType === "hydro";
+      if (node.type !== "load") return false;
+      const sizes = loadConfig(node).sizes;
+      const size = sizes.find((item) => powerRangeMaximumKw(node) < item.below) || sizes[sizes.length - 1];
+      return size.w !== size.h;
+    });
+    if (rotatableNodes.length) {
+      rotatableNodes.forEach((node) => {
+        if (node.type === "source") node.sourceRotation = Number(node.sourceRotation) === 90 ? 0 : 90;
+        else node.loadRotation = Number(node.loadRotation) === 90 ? 0 : 90;
+      });
+      setDirty(`${rotatableNodes.length === 1 ? rotatableNodes[0].name : "Selected nodes"} rotated`);
+      return;
+    }
+    if (state.mode === "source" && state.placement.sourceType === "hydro") {
+      state.placement.sourceRotation = state.placement.sourceRotation === 90 ? 0 : 90;
+      setCanvasStatus(`Hydroelectric placement rotated ${state.placement.sourceRotation} degrees`);
+      draw();
+      return;
+    }
+    if (state.mode === "load") {
+      state.placement.loadRotation = state.placement.loadRotation === 90 ? 0 : 90;
+      setCanvasStatus(`${LOAD_TYPES[state.placement.loadType].label} load placement rotated ${state.placement.loadRotation} degrees`);
+      draw();
+    }
   }
 
   function hitTestNode(world) {
@@ -921,11 +1410,13 @@
   }
 
   function onPointerDown(event) {
+    const panWithRightButton = event.button === 2;
+    if (panWithRightButton) event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
     const screen = pointerPosition(event);
     const world = screenToWorld(screen.x, screen.y);
-    const node = hitTestNode(world);
-    const line = hitTestLine(world);
+    const node = panWithRightButton ? null : hitTestNode(world);
+    const line = panWithRightButton ? null : hitTestLine(world);
 
     state.pointer = {
       down: true,
@@ -939,6 +1430,11 @@
       dragNodeIds: [],
       dragStartPositions: []
     };
+
+    if (panWithRightButton) {
+      state.pointer.action = "pan";
+      return;
+    }
 
     if (state.mode.startsWith("line-")) {
       if (node) {
@@ -1037,6 +1533,8 @@
   }
 
   function onPointerUp(event) {
+    const finishedDrag = state.pointer.action === "drag-selection" || state.pointer.action === "drag-node";
+    const dragStarts = finishedDrag ? [...(state.pointer.dragStartPositions || [])] : [];
     if (canvas.hasPointerCapture(event.pointerId)) {
       canvas.releasePointerCapture(event.pointerId);
     }
@@ -1045,6 +1543,32 @@
     state.pointer.dragNodeId = null;
     state.pointer.dragNodeIds = [];
     state.pointer.dragStartPositions = [];
+    if (!finishedDrag || !dragStarts.length) return;
+
+    const movedNodes = dragStarts.map((start) => getNode(start.id)).filter(Boolean);
+    const invalidNode = movedNodes.find((node) => validateNodePlacement(node));
+    if (invalidNode) {
+      const message = validateNodePlacement(invalidNode);
+      dragStarts.forEach((start) => {
+        const node = getNode(start.id);
+        if (!node) return;
+        node.x = start.x;
+        node.y = start.y;
+      });
+      state.lines.forEach(updateLineGeometry);
+      setDirty(`${message}; move cancelled`);
+      return;
+    }
+
+    let powerAdjusted = false;
+    movedNodes.forEach((node) => {
+      if (!node || node.type !== "source") return;
+      const next = clampNodePower(node, node.powerKw);
+      if (next === node.powerKw) return;
+      node.powerKw = next;
+      powerAdjusted = true;
+    });
+    if (powerAdjusted) setDirty("Renewable output adjusted for its new zone yield");
   }
 
   function onWheel(event) {
@@ -1068,18 +1592,125 @@
     renderAll();
   }
 
-  function draw() {
+  function paintNetworkLayer(rect) {
+    const renderState = {
+      rect,
+      selectedKeys: new Set(selectedItems().map(selectionKey)),
+      pollutionIndex: buildPollutionIndex(),
+      loadFillById: new Map()
+    };
+    const mainContext = ctx;
+    ctx = networkLayerContext;
+    try {
+      ctx.save();
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      drawLines("distribution", false, renderState);
+      drawNodes(renderState);
+      drawLines("transmission", true, renderState);
+      ctx.restore();
+      networkLayerValid = true;
+    } finally {
+      ctx = mainContext;
+    }
+  }
+
+  function draw(options = {}) {
     const rect = canvas.getBoundingClientRect();
     ctx.save();
     ctx.clearRect(0, 0, rect.width, rect.height);
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, rect.width, rect.height);
+    world.draw(ctx, state.camera, rect, state.zoneOverlay);
     drawGrid(rect);
-    drawLines();
+    if (!options.reuseNetwork || !networkLayerValid) paintNetworkLayer(rect);
+    ctx.drawImage(
+      networkLayerCanvas,
+      0,
+      0,
+      networkLayerCanvas.width,
+      networkLayerCanvas.height,
+      0,
+      0,
+      rect.width,
+      rect.height
+    );
     drawConnectionPreview();
-    drawNodes();
     ctx.restore();
     zoomReadout.textContent = `${Math.round(state.camera.scale * 100)}%`;
+  }
+
+  function pointNearViewport(point, rect, margin = 80) {
+    return point.x >= -margin
+      && point.x <= rect.width + margin
+      && point.y >= -margin
+      && point.y <= rect.height + margin;
+  }
+
+  function segmentNearViewport(a, b, rect, margin = 80) {
+    return Math.max(a.x, b.x) >= -margin
+      && Math.min(a.x, b.x) <= rect.width + margin
+      && Math.max(a.y, b.y) >= -margin
+      && Math.min(a.y, b.y) <= rect.height + margin;
+  }
+
+  function buildPollutionIndex() {
+    const cellSize = 300;
+    const cells = new Map();
+    state.nodes.forEach((node) => {
+      if (node.type !== "source" || !["coal", "gas"].includes(node.sourceType)) return;
+      const key = `${Math.floor(node.x / cellSize)}:${Math.floor(node.y / cellSize)}`;
+      const sources = cells.get(key);
+      if (sources) sources.push(node);
+      else cells.set(key, [node]);
+    });
+    return {
+      near(x, y) {
+        const cx = Math.floor(x / cellSize);
+        const cy = Math.floor(y / cellSize);
+        const result = [];
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+            result.push(...(cells.get(`${cx + offsetX}:${cy + offsetY}`) || []));
+          }
+        }
+        return result;
+      }
+    };
+  }
+
+  function colorChannels(color) {
+    const hex = String(color).match(/^#([0-9a-f]{6})$/i);
+    if (hex) return [parseInt(hex[1].slice(0, 2), 16), parseInt(hex[1].slice(2, 4), 16), parseInt(hex[1].slice(4, 6), 16)];
+    const rgb = String(color).match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    return rgb ? [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])] : [47, 111, 171];
+  }
+
+  function mixColor(color, tint, amount) {
+    const base = colorChannels(color);
+    return `rgb(${base.map((channel, index) => Math.round(channel + (tint[index] - channel) * amount)).join(", ")})`;
+  }
+
+  function loadFillColor(node, pollutionIndex) {
+    let fill = loadConfig(node).fill;
+    const size = loadVisualDimensions(node);
+    const zones = world.zoneMembership(node.x, node.y, size.width, size.height);
+    if (zones.industrial && !zones.residential && !zones.commercial) return fill;
+    pollutionIndex.near(node.x, node.y).forEach((source) => {
+      const half = source.sourceType === "coal" ? 150 : 100;
+      if (Math.abs(node.x - source.x) > half || Math.abs(node.y - source.y) > half) return;
+      fill = source.sourceType === "coal"
+        ? mixColor(fill, [124, 82, 43], 0.28)
+        : mixColor(fill, [82, 111, 70], 0.25);
+    });
+    return fill;
+  }
+
+  function renderedLoadFill(node, renderState) {
+    if (!renderState) return loadFillColor(node, buildPollutionIndex());
+    if (!renderState.loadFillById.has(node.id)) {
+      renderState.loadFillById.set(node.id, loadFillColor(node, renderState.pollutionIndex));
+    }
+    return renderState.loadFillById.get(node.id);
   }
 
   function drawGrid(rect) {
@@ -1119,14 +1750,16 @@
     return 250;
   }
 
-  function drawLines() {
+  function drawLines(type, redrawEndpoints, renderState) {
     state.lines.forEach((line) => {
+      if (line.type !== type) return;
       const from = getNode(line.from);
       const to = getNode(line.to);
       if (!from || !to) return;
       const a = worldToScreen(from.x, from.y);
       const b = worldToScreen(to.x, to.y);
-      const selected = isSelected("line", line.id);
+      if (!segmentNearViewport(a, b, renderState.rect)) return;
+      const selected = renderState.selectedKeys.has(`line:${line.id}`);
       const color = line.tripped ? colors.tripped : line.online ? "#111820" : colors.offline;
 
       if (selected) {
@@ -1144,6 +1777,16 @@
       ctx.save();
       drawLineBundle(from, to, line, color);
       ctx.restore();
+
+      if (redrawEndpoints) {
+        [from, to].forEach((node) => {
+          const p = worldToScreen(node.x, node.y);
+          if (!pointNearViewport(p, renderState.rect)) return;
+          const selected = renderState.selectedKeys.has(`node:${node.id}`);
+          const connecting = state.connecting && state.connecting.from === node.id;
+          drawNodeShape(node, p, selected || connecting, renderState);
+        });
+      }
     });
   }
 
@@ -1163,8 +1806,9 @@
     if (!line.online || line.tripped) ctx.setLineDash([6 * state.camera.scale, 4 * state.camera.scale]);
     ctx.beginPath();
     offsets.forEach((offsetM) => {
-      const startM = nodeBoundaryDistanceM(from, ux, uy, offsetM);
-      const endM = nodeBoundaryDistanceM(to, -ux, -uy, offsetM);
+      const endpointOverlapM = Math.min(0.75, len * 0.05);
+      const startM = Math.max(0, nodeBoundaryDistanceM(from, ux, uy, offsetM) - endpointOverlapM);
+      const endM = Math.max(0, nodeBoundaryDistanceM(to, -ux, -uy, -offsetM) - endpointOverlapM);
       const start = worldToScreen(from.x + nx * offsetM + ux * startM, from.y + ny * offsetM + uy * startM);
       const end = worldToScreen(to.x + nx * offsetM - ux * endM, to.y + ny * offsetM - uy * endM);
       ctx.moveTo(start.x, start.y);
@@ -1180,24 +1824,61 @@
     return [-spacingM / 2, spacingM / 2];
   }
 
+  function sourceVisualDimensions(node) {
+    const config = sourceConfig(node);
+    const maxKw = powerRangeMaximumKw(node);
+    const tier = config.sizes.find((item) => maxKw < item.below) || config.sizes[config.sizes.length - 1];
+    if (config.shape === "triangle") return { width: tier.w, height: Math.min(tier.h, tier.w * Math.sqrt(3) / 2) };
+    const rotated = config.shape === "rectangle" && Number(node.sourceRotation) === 90;
+    return rotated ? { width: tier.h, height: tier.w } : { width: tier.w, height: tier.h };
+  }
+
+  function loadVisualDimensions(node) {
+    const config = loadConfig(node);
+    const maxKw = powerRangeMaximumKw(node);
+    const tier = config.sizes.find((item) => maxKw < item.below) || config.sizes[config.sizes.length - 1];
+    const rotated = tier.w !== tier.h && Number(node.loadRotation) === 90;
+    return rotated ? { width: tier.h, height: tier.w } : { width: tier.w, height: tier.h };
+  }
+
+  function batteryVisualDimensions(node) {
+    const capacityGJ = batteryCapacityGJ(node);
+    const tier = BATTERY_SIZE_TIERS.find((item) => capacityGJ <= item.maximumGJ)
+      || BATTERY_SIZE_TIERS[BATTERY_SIZE_TIERS.length - 1];
+    return { width: tier.width, height: tier.height };
+  }
+
   function nodeBoundaryDistanceM(node, ux, uy, offsetM) {
     if (node.type === "pole") {
       const radius = POLE_RADIUS_M;
       return Math.sqrt(Math.max(0, radius * radius - offsetM * offsetM));
     }
-    if (node.type === "source" || node.type === "joint") {
-      const radius = node.type === "source" ? SOURCE_RADIUS_M : JOINT_RADIUS_M;
-      return Math.sqrt(Math.max(0, radius * radius - offsetM * offsetM));
+    if (node.type === "joint") {
+      const radius = substationSizeM(node) / 2;
+      return distanceToHexagonBoundary(radius, ux, uy, offsetM);
+    }
+    if (node.type === "source") {
+      const config = sourceConfig(node);
+      const size = sourceVisualDimensions(node);
+      if (config.shape === "circle") {
+        const radius = size.width / 2;
+        return Math.sqrt(Math.max(0, radius * radius - offsetM * offsetM));
+      }
+      if (config.shape === "triangle") {
+        return distanceToTriangleBoundary(size.width, size.height, ux, uy, offsetM);
+      }
+      return distanceToBoxBoundary(size.width / 2, size.height / 2, ux, uy, offsetM);
     }
     if (node.type === "tower") {
       return distanceToBoxBoundary(TOWER_SIZE_M / 2, TOWER_SIZE_M / 2, ux, uy, offsetM);
     }
     if (node.type === "load") {
-      const half = loadSizeM(node) / 2;
-      return distanceToBoxBoundary(half, half, ux, uy, offsetM);
+      const size = loadVisualDimensions(node);
+      return distanceToBoxBoundary(size.width / 2, size.height / 2, ux, uy, offsetM);
     }
     if (node.type === "battery") {
-      return distanceToBoxBoundary(BATTERY_WIDTH_M / 2, BATTERY_HEIGHT_M / 2, ux, uy, offsetM);
+      const size = batteryVisualDimensions(node);
+      return distanceToBoxBoundary(size.width / 2, size.height / 2, ux, uy, offsetM);
     }
     return nodeVisualRadiusM(node);
   }
@@ -1221,6 +1902,44 @@
     return candidates.length ? Math.min(...candidates) : Math.min(halfW, halfH);
   }
 
+  function distanceToHexagonBoundary(radius, ux, uy, offsetM) {
+    const vertices = Array.from({ length: 6 }, (_, index) => {
+      const angle = Math.PI / 6 + (TWO_PI * index) / 6;
+      return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+    });
+    return distanceToPolygonBoundary(vertices, ux, uy, offsetM, radius);
+  }
+
+  function distanceToTriangleBoundary(width, height, ux, uy, offsetM) {
+    const vertices = [
+      { x: 0, y: -height / 2 },
+      { x: width / 2, y: height / 2 },
+      { x: -width / 2, y: height / 2 }
+    ];
+    return distanceToPolygonBoundary(vertices, ux, uy, offsetM, Math.max(width, height) / 2);
+  }
+
+  function distanceToPolygonBoundary(vertices, ux, uy, offsetM, fallback) {
+    const nx = -uy;
+    const ny = ux;
+    const originX = nx * offsetM;
+    const originY = ny * offsetM;
+    const candidates = [];
+    vertices.forEach((start, index) => {
+      const end = vertices[(index + 1) % vertices.length];
+      const edgeX = end.x - start.x;
+      const edgeY = end.y - start.y;
+      const denominator = ux * edgeY - uy * edgeX;
+      if (Math.abs(denominator) < 1e-9) return;
+      const relativeX = start.x - originX;
+      const relativeY = start.y - originY;
+      const distance = (relativeX * edgeY - relativeY * edgeX) / denominator;
+      const edgePosition = (relativeX * uy - relativeY * ux) / denominator;
+      if (distance >= 0 && edgePosition >= -1e-6 && edgePosition <= 1 + 1e-6) candidates.push(distance);
+    });
+    return candidates.length ? Math.min(...candidates) : fallback;
+  }
+
   function drawConnectionPreview() {
     if (!state.connecting || !state.pointer.lastScreen) return;
     const from = getNode(state.connecting.from);
@@ -1238,17 +1957,26 @@
     ctx.restore();
   }
 
-  function drawNodes(labelBoxes) {
+  function drawNodes(renderState) {
     state.nodes.forEach((node) => {
       const p = worldToScreen(node.x, node.y);
-      const selected = isSelected("node", node.id);
+      if (!pointNearViewport(p, renderState.rect)) return;
+      const selected = renderState.selectedKeys.has(`node:${node.id}`);
       const connecting = state.connecting && state.connecting.from === node.id;
-      drawNodeShape(node, p, selected || connecting);
+      drawNodeShape(node, p, selected || connecting, renderState);
     });
+    drawSupportLabels(renderState.rect);
   }
 
-  function drawNodeShape(node, p, selected) {
-    const fill = nodeColor(node.type);
+  function drawNodeShape(node, p, selected, renderState) {
+    const sourceStyle = node.type === "source" ? sourceConfig(node) : null;
+    const fill = sourceStyle
+      ? sourceStyle.fill
+      : node.type === "load"
+        ? renderedLoadFill(node, renderState)
+        : node.type === "tower"
+          ? (world.isWater(node.x, node.y) ? WATER_SURFACE_COLOR : "#ffffff")
+          : nodeColor(node.type);
     const scale = state.camera.scale;
     ctx.save();
     if (selected) {
@@ -1262,10 +1990,10 @@
     ctx.shadowOffsetY = 0.8 * scale;
     ctx.fillStyle = fill;
     ctx.strokeStyle = node.type === "tower" ? colors.towerLine : "#ffffff";
-    ctx.lineWidth = 0.7 * scale;
+    ctx.lineWidth = (node.type === "source" ? 0.9 : 0.7) * scale;
 
     if (node.type === "joint") {
-      drawHexagon(p.x, p.y, JOINT_RADIUS_M * scale);
+      drawHexagon(p.x, p.y, substationSizeM(node) * scale / 2);
     } else if (node.type === "tower") {
       const size = TOWER_SIZE_M * scale;
       ctx.beginPath();
@@ -1274,14 +2002,20 @@
       ctx.beginPath();
       ctx.arc(p.x, p.y, POLE_RADIUS_M * scale, 0, Math.PI * 2);
     } else if (node.type === "battery") {
-      roundedRect(p.x - BATTERY_WIDTH_M * scale / 2, p.y - BATTERY_HEIGHT_M * scale / 2, BATTERY_WIDTH_M * scale, BATTERY_HEIGHT_M * scale, 1.5 * scale);
+      const size = batteryVisualDimensions(node);
+      roundedRect(
+        p.x - size.width * scale / 2,
+        p.y - size.height * scale / 2,
+        size.width * scale,
+        size.height * scale,
+        Math.min(size.width, size.height) * scale * 0.18
+      );
     } else if (node.type === "load") {
-      const size = loadSizeM(node) * scale;
+      const size = loadVisualDimensions(node);
       ctx.beginPath();
-      ctx.rect(p.x - size / 2, p.y - size / 2, size, size);
-    } else {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, SOURCE_RADIUS_M * scale, 0, Math.PI * 2);
+      ctx.rect(p.x - size.width * scale / 2, p.y - size.height * scale / 2, size.width * scale, size.height * scale);
+    } else if (node.type === "source") {
+      drawSourcePath(node, p, scale);
     }
     ctx.fill();
     ctx.shadowColor = "transparent";
@@ -1290,21 +2024,49 @@
     ctx.restore();
   }
 
-  function nodeVisualRadiusM(node) {
-    if (node.type === "source") return SOURCE_RADIUS_M;
-    if (node.type === "joint") return JOINT_RADIUS_M;
-    if (node.type === "pole") return POLE_RADIUS_M;
-    if (node.type === "tower") return Math.SQRT2 * TOWER_SIZE_M / 2;
-    if (node.type === "load") return Math.SQRT2 * loadSizeM(node) / 2;
-    if (node.type === "battery") return Math.hypot(BATTERY_WIDTH_M, BATTERY_HEIGHT_M) / 2;
-    return 8;
+  function drawSourcePath(node, p, scale) {
+    const config = sourceConfig(node);
+    const size = sourceVisualDimensions(node);
+    const width = size.width * scale;
+    const height = size.height * scale;
+    if (config.shape === "circle") {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, width / 2, 0, Math.PI * 2);
+      return;
+    }
+    if (config.shape === "triangle") {
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - height / 2);
+      ctx.lineTo(p.x + width / 2, p.y + height / 2);
+      ctx.lineTo(p.x - width / 2, p.y + height / 2);
+      ctx.closePath();
+      return;
+    }
+    if (config.shape === "rounded-square") {
+      roundedRect(p.x - width / 2, p.y - height / 2, width, height, Math.min(width, height) * 0.2);
+      return;
+    }
+    ctx.beginPath();
+    ctx.rect(p.x - width / 2, p.y - height / 2, width, height);
   }
 
-  function loadSizeM(node) {
-    const maxKw = node.maxPowerKw || node.powerKw || 0;
-    if (maxKw <= 99) return 5;
-    if (maxKw <= 999) return 10;
-    return 20;
+  function nodeVisualRadiusM(node) {
+    if (node.type === "source") {
+      const size = sourceVisualDimensions(node);
+      return Math.hypot(size.width, size.height) / 2;
+    }
+    if (node.type === "joint") return substationSizeM(node) / 2;
+    if (node.type === "pole") return POLE_RADIUS_M;
+    if (node.type === "tower") return Math.SQRT2 * TOWER_SIZE_M / 2;
+    if (node.type === "load") {
+      const size = loadVisualDimensions(node);
+      return Math.hypot(size.width, size.height) / 2;
+    }
+    if (node.type === "battery") {
+      const size = batteryVisualDimensions(node);
+      return Math.hypot(size.width, size.height) / 2;
+    }
+    return 8;
   }
 
   function drawHexagon(x, y, r) {
@@ -1326,6 +2088,7 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     if (node.type === "source" || node.type === "load") {
+      if (node.type === "source" && !["coal", "gas"].includes(node.sourceType)) ctx.fillStyle = "#4a3c00";
       ctx.font = `800 ${Math.max(1, 3.1 * scale)}px Inter, Segoe UI, sans-serif`;
       ctx.fillText(String(Math.round(node.powerKw || 0)), p.x, p.y);
     } else if (node.type === "joint") {
@@ -1343,19 +2106,102 @@
       ctx.lineTo(p.x - half, p.y + half);
       ctx.stroke();
     } else if (node.type === "battery") {
-      ctx.strokeStyle = "#fff";
-      ctx.lineWidth = 0.6 * scale;
-      ctx.strokeRect(p.x - 5 * scale, p.y - 3 * scale, 8 * scale, 6 * scale);
-      ctx.beginPath();
-      ctx.moveTo(p.x + 3 * scale, p.y - 1.2 * scale);
-      ctx.lineTo(p.x + 5 * scale, p.y - 1.2 * scale);
-      ctx.lineTo(p.x + 5 * scale, p.y + 1.2 * scale);
-      ctx.lineTo(p.x + 3 * scale, p.y + 1.2 * scale);
-      ctx.moveTo(p.x - 3 * scale, p.y);
-      ctx.lineTo(p.x + 1.3 * scale, p.y);
-      ctx.stroke();
+      ctx.font = `800 ${Math.max(1, 3.1 * scale)}px Inter, Segoe UI, sans-serif`;
+      ctx.fillText(String(Math.round(batteryEnergyGJ(node))), p.x, p.y);
     }
     ctx.restore();
+  }
+
+  function supportNumberText(node) {
+    const named = String(node.name || "").match(/(?:tower|pole)\s+([a-z]*\d+)/i);
+    if (named) return named[1].toUpperCase();
+    const idNumber = String(node.id || "").match(/\d+/);
+    return `${node.type === "tower" ? "T" : "P"}${idNumber ? idNumber[0] : "?"}`;
+  }
+
+  function boxesOverlap(a, b) {
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  }
+
+  function createBoxCollisionIndex(cellSize = 64) {
+    const cells = new Map();
+    const bounds = (box) => ({
+      left: Math.floor(box.left / cellSize),
+      right: Math.floor(box.right / cellSize),
+      top: Math.floor(box.top / cellSize),
+      bottom: Math.floor(box.bottom / cellSize)
+    });
+    const key = (x, y) => `${x}:${y}`;
+
+    return {
+      add(box) {
+        const range = bounds(box);
+        for (let x = range.left; x <= range.right; x += 1) {
+          for (let y = range.top; y <= range.bottom; y += 1) {
+            const cellKey = key(x, y);
+            const items = cells.get(cellKey);
+            if (items) items.push(box);
+            else cells.set(cellKey, [box]);
+          }
+        }
+      },
+      overlaps(box) {
+        const range = bounds(box);
+        const checked = new Set();
+        for (let x = range.left; x <= range.right; x += 1) {
+          for (let y = range.top; y <= range.bottom; y += 1) {
+            const items = cells.get(key(x, y)) || [];
+            for (const other of items) {
+              if (checked.has(other)) continue;
+              checked.add(other);
+              if (boxesOverlap(box, other)) return true;
+            }
+          }
+        }
+        return false;
+      }
+    };
+  }
+
+  function drawSupportLabels(rect) {
+    const scale = state.camera.scale;
+    const collisions = createBoxCollisionIndex();
+    state.nodes.forEach((node) => {
+      const p = worldToScreen(node.x, node.y);
+      if (!pointNearViewport(p, rect, 120)) return;
+      const radius = nodeVisualRadiusM(node) * scale + 1;
+      collisions.add({ left: p.x - radius, right: p.x + radius, top: p.y - radius, bottom: p.y + radius });
+    });
+    state.nodes.filter((node) => node.type === "pole" || node.type === "tower").forEach((node) => {
+      const p = worldToScreen(node.x, node.y);
+      if (!pointNearViewport(p, rect, 120)) return;
+      const text = supportNumberText(node);
+      const fontSize = Math.max(1, 3 * scale);
+      ctx.save();
+      ctx.font = `800 ${fontSize}px Inter, Segoe UI, sans-serif`;
+      const width = ctx.measureText(text).width + 2.4 * scale;
+      const height = fontSize + 2 * scale;
+      const offset = nodeVisualRadiusM(node) * scale + 2.5 * scale;
+      const candidates = [
+        { x: p.x, y: p.y - offset - height / 2 },
+        { x: p.x + offset + width / 2, y: p.y },
+        { x: p.x, y: p.y + offset + height / 2 },
+        { x: p.x - offset - width / 2, y: p.y }
+      ];
+      const candidate = candidates.find((item) => {
+        const box = { left: item.x - width / 2, right: item.x + width / 2, top: item.y - height / 2, bottom: item.y + height / 2 };
+        return !collisions.overlaps(box);
+      }) || candidates[0];
+      const box = { left: candidate.x - width / 2, right: candidate.x + width / 2, top: candidate.y - height / 2, bottom: candidate.y + height / 2 };
+      collisions.add(box);
+      ctx.fillStyle = "rgba(255,255,255,0.94)";
+      ctx.fillRect(box.left, box.top, width, height);
+      ctx.fillStyle = node.type === "tower" ? colors.towerLine : colors.pole;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, candidate.x, candidate.y);
+      ctx.restore();
+    });
   }
 
   function activeLevels(node) {
@@ -1431,6 +2277,7 @@
 
     state.lastTripCount = trippedThisSolve;
     computeNodeLineTotals();
+    computeSubstationStepPower();
     if (advanceSeconds > 0) {
       advanceBatteryEnergy(advanceSeconds);
       state.elapsedSeconds += advanceSeconds;
@@ -1459,42 +2306,57 @@
   }
 
   function updateVariableProfiles(advanceSeconds) {
-    const currentBucket = Math.floor(state.elapsedSeconds / VARIABLE_UPDATE_SECONDS);
-    const nextBucket = Math.floor((state.elapsedSeconds + advanceSeconds) / VARIABLE_UPDATE_SECONDS);
-    if (nextBucket <= currentBucket) return false;
+    const startSecond = state.elapsedSeconds;
+    const endSecond = startSecond + advanceSeconds;
+    const loadChanged = updateVariableProfileGroup("load", true, startSecond, endSecond);
+    const sourceChanged = updateVariableProfileGroup("source", false, startSecond, endSecond);
+    return loadChanged || sourceChanged;
+  }
+
+  function variableUpdateIntervalSeconds(node) {
+    return Math.max(2, BASE_VARIABLE_UPDATE_SECONDS + DEFAULT_VARIABILITY_INDEX - variabilityIndex(node));
+  }
+
+  function updateVariableProfileGroup(type, useSharedBias, startSecond, endSecond) {
+    const scheduled = state.nodes
+      .filter((node) => node.type === type && node.powerProfile === "variable")
+      .map((node) => {
+        const interval = variableUpdateIntervalSeconds(node);
+        const updates = Math.max(0, Math.floor(endSecond / interval) - Math.floor(startSecond / interval));
+        return { node, updates };
+      })
+      .filter((item) => item.updates > 0);
+    if (!scheduled.length) return false;
 
     let changed = false;
-    for (let bucket = currentBucket + 1; bucket <= nextBucket; bucket += 1) {
-      changed = updateVariableProfileGroup("load", true) || changed;
-      changed = updateVariableProfileGroup("source", false) || changed;
+    const rounds = Math.max(...scheduled.map((item) => item.updates));
+    for (let round = 1; round <= rounds; round += 1) {
+      if (useSharedBias) advanceVariableLoadBias();
+      scheduled.forEach((item) => {
+        if (item.updates < round) return;
+        changed = updateVariableProfileNode(item.node, useSharedBias) || changed;
+      });
     }
     return changed;
   }
 
-  function updateVariableProfileGroup(type, useSharedBias) {
-    const nodes = state.nodes.filter((node) => node.type === type && node.powerProfile === "variable");
-    if (!nodes.length) return false;
-    if (useSharedBias) advanceVariableLoadBias();
-
-    let changed = false;
-    nodes.forEach((node) => {
-      const cycleBias = advanceNodeVariationCycle(node);
-      const sharedBias = useSharedBias ? state.variableLoadBias : 0;
-      const directionalBias = useSharedBias
-        ? clamp(cycleBias * 0.55 + sharedBias * 0.8, -1, 1)
-        : clamp(cycleBias * 0.9, -1, 1);
-      const changePct = chooseVariableChangePct(variabilityIndex(node), directionalBias);
-      const maximum = variablePowerMaximumKw(node);
-      const minimum = variablePowerMinimumKw(node);
-      const currentPower = clamp(Number(node.powerKw) || 0, minimum, maximum);
-      const changeKw = Math.round(currentPower * changePct / 100);
-      const nextPower = clamp(Math.round(currentPower + changeKw), minimum, maximum);
-      if (nextPower !== node.powerKw) {
-        node.powerKw = nextPower;
-        changed = true;
-      }
-    });
-    return changed;
+  function updateVariableProfileNode(node, useSharedBias) {
+    const cycleBias = advanceNodeVariationCycle(node);
+    const sharedBias = useSharedBias ? state.variableLoadBias : 0;
+    const directionalBias = useSharedBias
+      ? clamp(cycleBias * 0.55 + sharedBias * 0.8, -1, 1)
+      : clamp(cycleBias * 0.9, -1, 1);
+    const changePct = chooseVariableChangePct(variabilityIndex(node), directionalBias);
+    const maximum = operatingPowerMaximumKw(node);
+    const minimum = operatingPowerMinimumKw(node);
+    const currentPower = clamp(Number(node.powerKw) || 0, minimum, maximum);
+    const changeKw = Math.round((maximum - minimum) * changePct / 100);
+    const nextPower = clamp(Math.round(currentPower + changeKw), minimum, maximum);
+    if (nextPower !== node.powerKw) {
+      node.powerKw = nextPower;
+      return true;
+    }
+    return false;
   }
 
   function advanceVariableLoadBias() {
@@ -1581,6 +2443,7 @@
     state.nodes.forEach((node) => {
       node.effectivePowerKw = 0;
       node.batteryPowerKw = 0;
+      node.steppedPowerKw = 0;
       node.lineNetKw = 0;
       node.curtailedKw = 0;
       node.unservedKw = 0;
@@ -2047,6 +2910,28 @@
     });
   }
 
+  function computeSubstationStepPower() {
+    state.nodes.forEach((node) => {
+      if (node.type !== "joint") return;
+      const incident = state.lines.filter((line) => {
+        return line.online && !line.tripped && (line.from === node.id || line.to === node.id);
+      });
+      const distribution = incident.filter((line) => line.type === "distribution");
+      const transmission = incident.filter((line) => line.type === "transmission");
+      if (!distribution.length || !transmission.length) {
+        node.steppedPowerKw = 0;
+        return;
+      }
+      const distributionNetKw = distribution.reduce((sum, line) => sum + lineEndPowerKw(line, node.id), 0);
+      const transmissionNetKw = transmission.reduce((sum, line) => sum + lineEndPowerKw(line, node.id), 0);
+      node.steppedPowerKw = Math.max(Math.abs(distributionNetKw), Math.abs(transmissionNetKw));
+      const maximumKw = substationMaxStepKw(node);
+      if (node.steppedPowerKw > maximumKw + 0.05) {
+        addWarningOnce(`${node.name} is stepping ${formatMwFromKw(node.steppedPowerKw)}, above its ${formatMwFromKw(maximumKw)} rating.`);
+      }
+    });
+  }
+
   function resetLinePower(line) {
     line.currentA = 0;
     line.powerKw = 0;
@@ -2202,16 +3087,24 @@
     const locked = state.running;
     const nameValue = commonValue(nodes, (node) => node.name);
     const displayValue = type === "joint" ? commonValue(nodes, (node) => (node.display || "").slice(0, 2).toUpperCase()) : "";
+    const commonMaxStepMw = type === "joint" ? commonValue(nodes, (node) => substationMaxStepKw(node) / 1000) : "";
     const slider = type === "source" || type === "load";
     const sliderTitle = type === "source" ? "Output" : "Demand";
-    const maxCap = type === "source" ? 100000 : 10000;
+    const maxCap = slider ? Math.min(...nodes.map(nodePowerCapKw)) : 0;
+    const commonMin = slider ? commonValue(nodes, (node) => node.minPowerKw) : "";
     const commonMax = slider ? commonValue(nodes, (node) => node.maxPowerKw) : "";
     const commonPower = slider ? commonValue(nodes, (node) => node.powerKw) : "";
     const commonProfile = slider ? commonValue(nodes, (node) => node.powerProfile || "constant") : "";
     const commonFrequency = slider ? commonValue(nodes, variabilityIndex) : "";
+    const commonSourceType = type === "source" ? commonValue(nodes, (node) => node.sourceType || "generic") : "";
+    const commonLoadType = type === "load" ? commonValue(nodes, (node) => node.loadType || "general") : "";
+    const profileLocked = type === "source" && nodes.some(sourceProfileLocked);
     const powerLocked = state.running && nodes.some((node) => node.powerProfile === "variable");
-    const commonMinimum = commonProfile === "variable" && commonMax !== "" ? Number(commonMax) * 0.2 : 0;
-    const commonCeiling = commonProfile === "variable" && commonMax !== "" ? Number(commonMax) * 0.9 : commonMax === "" ? maxCap : Number(commonMax);
+    const minimumFloor = slider ? powerRangeFloorKw(nodes[0]) : 0;
+    const commonMinimum = commonMin === "" ? minimumFloor : Number(commonMin);
+    const commonCeiling = commonMax === "" ? maxCap : Number(commonMax);
+    const operatingMinimum = slider ? Math.max(...nodes.map(operatingPowerMinimumKw)) : 0;
+    const operatingCeiling = slider ? Math.min(...nodes.map(operatingPowerMaximumKw)) : 0;
     const maxForStep = commonMax === "" ? maxCap : Number(commonMax);
     const step = powerStepForMax(maxForStep);
 
@@ -2227,13 +3120,22 @@
             <label for="bulkNodeDisplay">Display</label>
             <input id="bulkNodeDisplay" type="text" maxlength="2" value="${escapeAttr(displayValue)}" placeholder="${displayValue === "" ? "Mixed" : ""}"${locked ? " disabled" : ""}>
           </div>
+          <div class="field">
+            <div class="field-row">
+              <label for="bulkSubstationMaxStepMw">Maximum stepped power</label>
+              <span class="field-value">1-80 MW</span>
+            </div>
+            <input id="bulkSubstationMaxStepMw" type="number" min="1" max="80" step="0.1" value="${escapeAttr(commonMaxStepMw)}" placeholder="${commonMaxStepMw === "" ? "Mixed" : ""}"${locked ? " disabled" : ""}>
+          </div>
         ` : ""}
         ${slider ? `
+          ${type === "source" ? `<div class="readout-row" style="margin-bottom: 13px;"><span class="readout-label">Source type</span><span class="readout-value">${commonSourceType === "" ? "Mixed" : escapeHtml(SOURCE_TYPES[commonSourceType]?.label || "Legacy")}</span></div>` : ""}
+          ${type === "load" ? `<div class="readout-row" style="margin-bottom: 13px;"><span class="readout-label">Load type</span><span class="readout-value">${commonLoadType === "" ? "Mixed" : escapeHtml(LOAD_TYPES[commonLoadType]?.label || "General")}</span></div>` : ""}
           <div class="field">
             <label>Runtime behavior</label>
             <div class="segmented">
-              <button type="button" data-bulk-power-profile="constant" class="${commonProfile === "constant" ? "active" : ""}"${locked ? " disabled" : ""}>Constant</button>
-              <button type="button" data-bulk-power-profile="variable" class="${commonProfile === "variable" ? "active" : ""}"${locked ? " disabled" : ""}>Variable</button>
+              <button type="button" data-bulk-power-profile="constant" class="${commonProfile === "constant" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Constant</button>
+              <button type="button" data-bulk-power-profile="variable" class="${commonProfile === "variable" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Variable</button>
             </div>
           </div>
           ${commonProfile === "variable" ? `
@@ -2242,22 +3144,29 @@
                 <label for="bulkVariabilityIndex">Frequency index</label>
                 <span class="field-value" id="bulkVariabilityReadout">${commonFrequency === "" ? "Mixed" : commonFrequency}</span>
               </div>
-              <input id="bulkVariabilityIndex" type="range" min="1" max="10" step="1" value="${commonFrequency === "" ? DEFAULT_VARIABILITY_INDEX : commonFrequency}"${locked ? " disabled" : ""}>
+              <input id="bulkVariabilityIndex" type="range" min="1" max="10" step="1" value="${commonFrequency === "" ? DEFAULT_VARIABILITY_INDEX : commonFrequency}"${locked || profileLocked ? " disabled" : ""}>
             </div>
           ` : ""}
           <div class="field">
             <div class="field-row">
-              <label for="bulkMaxPowerNumber">Maximum</label>
-              <span class="field-value">${type === "source" ? "100,000 kW cap" : "10,000 kW cap"}</span>
+              <label for="bulkMinPowerNumber">Range minimum</label>
+              <span class="field-value">${type === "source" ? "0 kW minimum" : "Above 0 kW"}</span>
             </div>
-            <input id="bulkMaxPowerNumber" type="number" min="0" max="${maxCap}" step="${step}" value="${escapeAttr(commonMax)}" placeholder="${commonMax === "" ? "Mixed" : ""}"${locked ? " disabled" : ""}>
+            <input id="bulkMinPowerNumber" type="number" min="${minimumFloor}" max="${Math.max(minimumFloor, commonCeiling - 1)}" step="${step}" value="${escapeAttr(commonMin)}" placeholder="${commonMin === "" ? "Mixed" : ""}"${locked ? " disabled" : ""}>
+          </div>
+          <div class="field">
+            <div class="field-row">
+              <label for="bulkMaxPowerNumber">Range maximum</label>
+              <span class="field-value">${formatKw(maxCap)} cap</span>
+            </div>
+            <input id="bulkMaxPowerNumber" type="number" min="${commonMinimum + 1}" max="${maxCap}" step="${step}" value="${escapeAttr(commonMax)}" placeholder="${commonMax === "" ? "Mixed" : ""}"${locked ? " disabled" : ""}>
           </div>
           <div class="field">
             <div class="field-row">
               <label for="bulkPowerNumber">Actual ${sliderTitle.toLowerCase()}</label>
               <span class="field-value">${commonPower === "" ? "Mixed" : formatKw(Number(commonPower))}</span>
             </div>
-            <input id="bulkPowerNumber" type="number" min="${commonMinimum}" max="${commonCeiling}" step="${step}" value="${escapeAttr(commonPower)}" placeholder="${commonPower === "" ? "Mixed" : ""}"${powerLocked ? " disabled" : ""}>
+            <input id="bulkPowerNumber" type="number" min="${operatingMinimum}" max="${operatingCeiling}" step="${step}" value="${escapeAttr(commonPower)}" placeholder="${commonPower === "" ? "Mixed" : ""}"${powerLocked ? " disabled" : ""}>
           </div>
         ` : ""}
         ${type === "battery" ? `
@@ -2369,9 +3278,33 @@
       });
     }
 
-    document.querySelectorAll("[data-bulk-power-profile]").forEach((button) => {
-      button.addEventListener("click", () => {
+    const substationMaxStep = document.getElementById("bulkSubstationMaxStepMw");
+    if (substationMaxStep) {
+      const commitSubstationRating = () => {
         if (state.running) return;
+        const enteredMw = Number(substationMaxStep.value);
+        const nextKw = clamp(
+          Number.isFinite(enteredMw) ? Math.round(enteredMw * 1000) : DEFAULT_SUBSTATION_MAX_STEP_KW,
+          MIN_SUBSTATION_MAX_STEP_KW,
+          SUBSTATION_MAX_STEP_KW
+        );
+        nodes.forEach((node) => {
+          node.maxStepPowerKw = nextKw;
+        });
+        markOperatingEdit("Selected substation ratings updated");
+        renderProperties();
+      };
+      substationMaxStep.addEventListener("change", commitSubstationRating);
+      substationMaxStep.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        commitSubstationRating();
+      });
+    }
+
+    propertiesEl.querySelectorAll("[data-bulk-power-profile]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (state.running || nodes.some(sourceProfileLocked)) return;
         nodes.forEach((node) => {
           node.powerProfile = button.dataset.bulkPowerProfile;
           ensureVariationState(node);
@@ -2396,20 +3329,30 @@
       });
     }
 
+    const minPower = document.getElementById("bulkMinPowerNumber");
     const maxPower = document.getElementById("bulkMaxPowerNumber");
-    if (maxPower) {
-      maxPower.addEventListener("input", (event) => {
-        if (state.running) return;
-        const maxCap = nodes[0].type === "source" ? 100000 : 10000;
-        const nextMax = clamp(Number(event.target.value) || 0, 0, maxCap);
-        nodes.forEach((node) => {
-          node.maxPowerKw = nextMax;
-          node.powerKw = clampNodePower(node, node.powerKw);
-        });
-        markOperatingEdit("Selection maximum updated");
+    const commitBulkRange = (side) => {
+      if (state.running) return;
+      const value = Number(side === "min" ? minPower.value : maxPower.value);
+      nodes.forEach((node) => {
+        if (side === "min") setNodePowerRange(node, value, node.maxPowerKw, "min");
+        else setNodePowerRange(node, node.minPowerKw, value, "max");
       });
-    }
-
+      markOperatingEdit(`Selection range ${side === "min" ? "minimum" : "maximum"} updated`);
+      renderProperties();
+    };
+    [
+      [minPower, "min"],
+      [maxPower, "max"]
+    ].forEach(([input, side]) => {
+      if (!input) return;
+      input.addEventListener("change", () => commitBulkRange(side));
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        commitBulkRange(side);
+      });
+    });
     const powerNumber = document.getElementById("bulkPowerNumber");
     if (powerNumber) {
       const commitPower = () => {
@@ -2465,10 +3408,11 @@
       });
     }
 
-    document.querySelectorAll("[data-bulk-line-type]").forEach((button) => {
+    propertiesEl.querySelectorAll("[data-bulk-line-type]").forEach((button) => {
       button.addEventListener("click", () => {
         if (state.running) return;
         const nextType = button.dataset.bulkLineType;
+        if (lines.every((line) => line.type === nextType)) return;
         const message = lines.map((line) => validateLineTypeChange(line, nextType)).find(Boolean);
         if (message) {
           setCanvasStatus(message);
@@ -2509,16 +3453,18 @@
     const incident = state.lines.filter((line) => line.from === node.id || line.to === node.id);
     const slider = node.type === "source" || node.type === "load";
     const sliderTitle = node.type === "source" ? "Output" : "Demand";
-    const maxCap = node.type === "source" ? 100000 : 10000;
+    const maxCap = slider ? nodePowerCapKw(node) : 0;
     const profile = normalizePowerProfile(node.powerProfile);
-    const configuredMax = Number(node.maxPowerKw);
-    const sliderMax = clamp(Number.isFinite(configuredMax) ? configuredMax : maxCap, 0, maxCap);
-    const powerControlMaximum = profile === "variable" ? sliderMax * 0.9 : sliderMax;
-    const sliderStep = powerStepForMax(sliderMax);
+    const rangeMin = slider ? powerRangeMinimumKw(node) : 0;
+    const rangeMax = slider ? powerRangeMaximumKw(node) : 0;
+    const sliderMin = slider ? operatingPowerMinimumKw(node) : 0;
+    const sliderMax = slider ? operatingPowerMaximumKw(node) : 0;
+    const sliderFloor = slider ? powerRangeFloorKw(node) : 0;
+    const sliderStep = powerStepForMax(rangeMax);
     const flowRows = incident.map((line) => flowRowHtml(line, node.id)).join("");
     const locked = state.running;
     const powerLocked = state.running && profile === "variable";
-    const sliderMinimum = variablePowerMinimumKw(node);
+    const profileLocked = sourceProfileLocked(node);
 
     propertiesEl.innerHTML = `
       <div class="prop-group">
@@ -2529,6 +3475,9 @@
         </div>
         <div class="readout-list">
           <div class="readout-row"><span class="readout-label">Type</span><span class="readout-value">${labelType(node.type)}</span></div>
+          ${node.type === "source" ? `<div class="readout-row"><span class="readout-label">Source type</span><span class="readout-value">${escapeHtml(sourceTypeLabel(node))}</span></div>` : ""}
+          ${node.type === "source" && ["wind", "solar", "geothermal"].includes(node.sourceType) ? `<div class="readout-row"><span class="readout-label">Zone yield</span><span class="readout-value">${Math.round(sourceYieldFactor(node) * 100)}%</span></div>` : ""}
+          ${node.type === "load" ? `<div class="readout-row"><span class="readout-label">Load type</span><span class="readout-value">${escapeHtml(loadTypeLabel(node))}</span></div>` : ""}
           <div class="readout-row"><span class="readout-label">Position</span><span class="readout-value">${Math.round(node.x)}, ${Math.round(node.y)} m</span></div>
         </div>
         ${node.type === "joint" ? `
@@ -2544,8 +3493,8 @@
           <div class="field">
             <label>Runtime behavior</label>
             <div class="segmented">
-              <button type="button" data-power-profile="constant" class="${profile === "constant" ? "active" : ""}"${locked ? " disabled" : ""}>Constant</button>
-              <button type="button" data-power-profile="variable" class="${profile === "variable" ? "active" : ""}"${locked ? " disabled" : ""}>Variable</button>
+              <button type="button" data-power-profile="constant" class="${profile === "constant" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Constant</button>
+              <button type="button" data-power-profile="variable" class="${profile === "variable" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Variable</button>
             </div>
           </div>
           ${profile === "variable" ? `
@@ -2554,23 +3503,30 @@
                 <label for="variabilityIndex">Frequency index</label>
                 <span class="field-value" id="variabilityReadout">${variabilityIndex(node)}</span>
               </div>
-              <input id="variabilityIndex" type="range" min="1" max="10" step="1" value="${variabilityIndex(node)}"${locked ? " disabled" : ""}>
+              <input id="variabilityIndex" type="range" min="1" max="10" step="1" value="${variabilityIndex(node)}"${locked || profileLocked ? " disabled" : ""}>
             </div>
           ` : ""}
           <div class="field">
             <div class="field-row">
-              <label for="maxPowerNumber">Maximum</label>
-              <span class="field-value">${node.type === "source" ? "100,000 kW cap" : "10,000 kW cap"}</span>
+              <label for="minPowerNumber">Range minimum</label>
+              <span class="field-value">${node.type === "source" ? "0 kW minimum" : "Above 0 kW"}</span>
             </div>
-            <input id="maxPowerNumber" type="number" min="0" max="${maxCap}" step="${sliderStep}" value="${sliderMax}"${locked ? " disabled" : ""}>
+            <input id="minPowerNumber" type="number" min="${sliderFloor}" max="${Math.max(sliderFloor, rangeMax - 1)}" step="${sliderStep}" value="${rangeMin}"${locked ? " disabled" : ""}>
+          </div>
+          <div class="field">
+            <div class="field-row">
+              <label for="maxPowerNumber">Range maximum</label>
+              <span class="field-value">${formatKw(maxCap)} cap</span>
+            </div>
+            <input id="maxPowerNumber" type="number" min="${rangeMin + 1}" max="${maxCap}" step="${sliderStep}" value="${rangeMax}"${locked ? " disabled" : ""}>
           </div>
           <div class="field">
             <div class="field-row">
               <label for="powerSlider">${powerLocked ? "Computer-controlled" : "Actual"} ${sliderTitle.toLowerCase()}</label>
               <span class="field-value" id="powerReadout">${formatKw(node.powerKw)}</span>
             </div>
-            <input id="powerSlider" type="range" min="${sliderMinimum}" max="${powerControlMaximum}" step="${sliderStep}" value="${node.powerKw}"${powerLocked ? " disabled" : ""}>
-            <input id="powerNumber" type="number" min="${sliderMinimum}" max="${powerControlMaximum}" step="${sliderStep}" value="${node.powerKw}"${powerLocked ? " disabled" : ""}>
+            <input id="powerSlider" type="range" min="${sliderMin}" max="${sliderMax}" step="${sliderStep}" value="${node.powerKw}"${powerLocked ? " disabled" : ""}>
+            <input id="powerNumber" type="number" min="${sliderMin}" max="${sliderMax}" step="${sliderStep}" value="${node.powerKw}"${powerLocked ? " disabled" : ""}>
           </div>
         </div>
       ` : ""}
@@ -2601,6 +3557,22 @@
           <div class="readout-list">
             <div class="readout-row"><span class="readout-label">Reserve</span><span class="readout-value" id="batteryReserveReadout">${formatGJ(batteryEnergyGJ(node), 4)} / ${formatGJ(batteryCapacityGJ(node))}</span></div>
             <div class="readout-row"><span class="readout-label">State of charge</span><span class="readout-value" id="batterySocReadout">${formatPercent(batteryReserveFraction(node))}</span></div>
+          </div>
+        </div>
+      ` : ""}
+      ${node.type === "joint" ? `
+        <div class="prop-group">
+          <h3>Transformer</h3>
+          <div class="field">
+            <div class="field-row">
+              <label for="substationMaxStepMw">Maximum stepped power</label>
+              <span class="field-value">1-80 MW</span>
+            </div>
+            <input id="substationMaxStepMw" type="number" min="1" max="80" step="0.1" value="${editableDecimal(substationMaxStepKw(node) / 1000, 3)}"${locked ? " disabled" : ""}>
+          </div>
+          <div class="readout-list">
+            <div class="readout-row"><span class="readout-label">Stepped power</span><span class="readout-value">${state.solved ? formatMwFromKw(node.steppedPowerKw) : "--"}</span></div>
+            <div class="readout-row"><span class="readout-label">Utilization</span><span class="readout-value">${state.solved ? formatPercent(node.steppedPowerKw / substationMaxStepKw(node)) : "--"}</span></div>
           </div>
         </div>
       ` : ""}
@@ -2645,14 +3617,36 @@
       });
     }
 
+    const substationMaxStepInput = document.getElementById("substationMaxStepMw");
+    if (substationMaxStepInput) {
+      const commitSubstationRating = () => {
+        if (state.running) return;
+        const enteredMw = Number(substationMaxStepInput.value);
+        node.maxStepPowerKw = clamp(
+          Number.isFinite(enteredMw) ? Math.round(enteredMw * 1000) : DEFAULT_SUBSTATION_MAX_STEP_KW,
+          MIN_SUBSTATION_MAX_STEP_KW,
+          SUBSTATION_MAX_STEP_KW
+        );
+        markOperatingEdit(`${node.name} transformer rating updated`);
+        renderProperties();
+      };
+      substationMaxStepInput.addEventListener("change", commitSubstationRating);
+      substationMaxStepInput.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        commitSubstationRating();
+      });
+    }
+
     if (slider) {
       const range = document.getElementById("powerSlider");
       const number = document.getElementById("powerNumber");
+      const minNumber = document.getElementById("minPowerNumber");
       const maxNumber = document.getElementById("maxPowerNumber");
       const readout = document.getElementById("powerReadout");
-      document.querySelectorAll("[data-power-profile]").forEach((button) => {
+      propertiesEl.querySelectorAll("[data-power-profile]").forEach((button) => {
         button.addEventListener("click", () => {
-          if (state.running) return;
+          if (state.running || sourceProfileLocked(node)) return;
           node.powerProfile = button.dataset.powerProfile;
           ensureVariationState(node);
           node.powerKw = clampNodePower(node, node.powerKw);
@@ -2663,7 +3657,7 @@
       const variability = document.getElementById("variabilityIndex");
       if (variability) {
         variability.addEventListener("input", (event) => {
-          if (state.running) return;
+          if (state.running || sourceProfileLocked(node)) return;
           node.variabilityIndex = clamp(Math.round(Number(event.target.value) || DEFAULT_VARIABILITY_INDEX), 1, 10);
           const variabilityReadout = document.getElementById("variabilityReadout");
           if (variabilityReadout) variabilityReadout.textContent = String(node.variabilityIndex);
@@ -2674,6 +3668,7 @@
         const step = powerStepForMax(max);
         range.step = step;
         number.step = step;
+        minNumber.step = step;
         maxNumber.step = step;
       };
       const updatePower = (value) => {
@@ -2703,28 +3698,24 @@
         event.preventDefault();
         updatePower(event.target.value);
       });
-      maxNumber.addEventListener("input", (event) => {
+      const commitRange = (side) => {
         if (state.running) return;
-        const nextMax = clamp(Number(event.target.value) || 0, 0, maxCap);
-        node.maxPowerKw = nextMax;
-        node.powerKw = clampNodePower(node, node.powerKw);
-        range.min = variablePowerMinimumKw(node);
-        number.min = variablePowerMinimumKw(node);
-        range.max = variablePowerMaximumKw(node);
-        number.max = variablePowerMaximumKw(node);
-        setPowerControlScale(nextMax);
-        range.value = node.powerKw;
-        number.value = node.powerKw;
-        readout.textContent = formatKw(node.powerKw);
-        state.dirty = true;
-        state.solved = false;
-        state.simulationNeedsSolve = true;
-        state.elapsedSeconds = 0;
-        resetVariableProfileDrift();
-        resetSolution();
-        updateTimeReadout();
-        updateSummaries();
-        draw();
+        if (side === "min") setNodePowerRange(node, minNumber.value, node.maxPowerKw, "min");
+        else setNodePowerRange(node, node.minPowerKw, maxNumber.value, "max");
+        setPowerControlScale(node.maxPowerKw);
+        markOperatingEdit(`${node.name} range ${side === "min" ? "minimum" : "maximum"} updated`);
+        renderProperties();
+      };
+      [
+        [minNumber, "min"],
+        [maxNumber, "max"]
+      ].forEach(([input, side]) => {
+        input.addEventListener("change", () => commitRange(side));
+        input.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          commitRange(side);
+        });
       });
     }
 
@@ -2832,8 +3823,8 @@
       <div class="prop-group">
         <h3>Line Type</h3>
         <div class="segmented">
-          <button type="button" data-line-type="distribution" class="${line.type === "distribution" ? "active" : ""}"${state.running ? " disabled" : ""}>10 kV</button>
-          <button type="button" data-line-type="transmission" class="${line.type === "transmission" ? "active" : ""}"${state.running ? " disabled" : ""}>100 kV</button>
+          <button type="button" data-inspector-line-type="distribution" class="${line.type === "distribution" ? "active" : ""}"${state.running ? " disabled" : ""}>10 kV</button>
+          <button type="button" data-inspector-line-type="transmission" class="${line.type === "transmission" ? "active" : ""}"${state.running ? " disabled" : ""}>100 kV</button>
         </div>
       </div>
       <div class="prop-group">
@@ -2862,10 +3853,11 @@
       </div>
     `;
 
-    document.querySelectorAll("[data-line-type]").forEach((button) => {
+    propertiesEl.querySelectorAll("[data-inspector-line-type]").forEach((button) => {
       button.addEventListener("click", () => {
         if (state.running) return;
-        const nextType = button.dataset.lineType;
+        const nextType = button.dataset.inspectorLineType;
+        if (line.type === nextType) return;
         const message = validateLineTypeChange(line, nextType);
         if (message) {
           setCanvasStatus(message);
@@ -2912,21 +3904,6 @@
     }).join("");
     propertiesEl.innerHTML = `
       <div class="prop-group">
-        <h3>Placement</h3>
-        <div class="field">
-          <label for="placementJointType">Joint tool</label>
-          <select id="placementJointType"${state.running ? " disabled" : ""}>${jointTypeOptions(state.placement.jointType)}</select>
-        </div>
-        <div class="field">
-          <label for="placementDistributionVariant">10 kV line tool</label>
-          <select id="placementDistributionVariant"${state.running ? " disabled" : ""}>${lineVariantOptions(state.placement.distributionVariant)}</select>
-        </div>
-        <div class="field">
-          <label for="placementTransmissionVariant">100 kV line tool</label>
-          <select id="placementTransmissionVariant"${state.running ? " disabled" : ""}>${lineVariantOptions(state.placement.transmissionVariant)}</select>
-        </div>
-      </div>
-      <div class="prop-group">
         <h3>Totals</h3>
         <div class="readout-list">
           <div class="readout-row"><span class="readout-label">Nodes</span><span class="readout-value">${state.nodes.length}</span></div>
@@ -2944,23 +3921,6 @@
         <div class="warning-list">${warnings || `<p class="empty-note">No warnings.</p>`}</div>
       </div>
     `;
-
-    document.getElementById("placementJointType").addEventListener("change", (event) => {
-      if (state.running) return;
-      state.placement.jointType = event.target.value;
-      setCanvasStatus(`Joint tool: ${event.target.options[event.target.selectedIndex].text}`);
-      draw();
-    });
-    document.getElementById("placementDistributionVariant").addEventListener("change", (event) => {
-      if (state.running) return;
-      state.placement.distributionVariant = event.target.value;
-      setCanvasStatus(`10 kV line: ${lineVariant({ variant: event.target.value }).label}`);
-    });
-    document.getElementById("placementTransmissionVariant").addEventListener("change", (event) => {
-      if (state.running) return;
-      state.placement.transmissionVariant = event.target.value;
-      setCanvasStatus(`100 kV line: ${lineVariant({ variant: event.target.value }).label}`);
-    });
   }
 
   function flowRowHtml(line, nodeId) {
@@ -3051,6 +4011,18 @@
     source.unservedKw = finiteOr(source.unservedKw, 0);
     source.island = finiteOr(source.island, 0);
 
+    const maxStepPowerKw = firstFinite(
+      source.maxStepPowerKw,
+      source.maximumStepPowerKw,
+      source.transformerRatingKw,
+      source.substationCapacityKw,
+      source.maxTransferKw
+    );
+    source.maxStepPowerKw = source.type === "joint"
+      ? clamp(maxStepPowerKw ?? DEFAULT_SUBSTATION_MAX_STEP_KW, MIN_SUBSTATION_MAX_STEP_KW, SUBSTATION_MAX_STEP_KW)
+      : 0;
+    source.steppedPowerKw = source.type === "joint" ? Math.max(0, finiteOr(source.steppedPowerKw, 0)) : 0;
+
     if (source.type === "joint") {
       source.display = nonEmptyText(source.display ?? source.shortName ?? source.code, source.name.slice(0, 2)).slice(0, 2).toUpperCase();
     } else {
@@ -3059,6 +4031,14 @@
 
     const profileValue = source.powerProfile ?? source.runtimeBehavior ?? source.runtimeProfile ?? source.controlMode ?? source.variable;
     source.powerProfile = ["source", "load"].includes(source.type) ? normalizePowerProfile(profileValue) : "constant";
+    source.sourceType = source.type === "source"
+      ? normalizeSourceType(source.sourceType ?? source.sourceKind ?? source.generatorType ?? source.generationType, source)
+      : "";
+    source.sourceRotation = source.type === "source" && normalizeKey(source.sourceType) === "hydro" && Number(source.sourceRotation ?? source.rotation) === 90 ? 90 : 0;
+    source.loadType = source.type === "load"
+      ? normalizeLoadType(source.loadType ?? source.loadKind ?? source.demandType ?? source.category, source)
+      : "";
+    source.loadRotation = source.type === "load" && Number(source.loadRotation ?? source.rotation) === 90 ? 90 : 0;
     const frequency = firstFinite(source.variabilityIndex, source.frequencyIndex, source.variationFrequency, source.frequency);
     source.variabilityIndex = clamp(Math.round(frequency ?? DEFAULT_VARIABILITY_INDEX), 1, 10);
     const phase = firstFinite(source.variationPhase, source.variablePhase, source.cyclePhase);
@@ -3067,17 +4047,26 @@
     source.variationDeviationTrend = clamp(firstFinite(source.variationDeviationTrend, source.cycleDeviationTrend) ?? (Math.random() - 0.5) * 0.02, -0.035, 0.035);
 
     if (source.type === "source") {
+      applyFixedSourceBehavior(source);
       const power = firstFinite(source.powerKw, source.actualPowerKw, source.outputKw, source.powerOutputKw, source.power_output_kw, source.generationKw, source.generatedKw);
+      const minKw = firstFinite(source.minPowerKw, source.minimumPowerKw, source.minKw, source.minimumKw, source.rangeMinKw);
       const maxKw = firstFinite(source.maxPowerKw, source.maximumPowerKw, source.maxKw, source.capacityKw, source.ratingKw, source.powerRatingKw);
-      source.maxPowerKw = clamp(maxKw ?? Math.max(power ?? 0, 10000), 0, 100000);
+      const config = sourceConfig(source);
+      source.maxPowerKw = clamp(maxKw ?? Math.max(power ?? 0, config.defaultMaxKw), 1, config.capKw);
+      source.minPowerKw = minKw ?? (source.powerProfile === "variable" ? Math.max(0, source.maxPowerKw * 0.2) : 0);
+      setNodePowerRange(source, source.minPowerKw, source.maxPowerKw);
       source.powerKw = clampNodePower(source, power ?? 0);
       source.batteryCapacityGJ = 0;
       source.batteryEnergyGJ = 0;
       source.batteryRateMw = 0;
     } else if (source.type === "load") {
       const power = firstFinite(source.powerKw, source.actualPowerKw, source.demandKw, source.powerDemandKw, source.power_demand_kw, source.loadKw, source.drawKw);
+      const minKw = firstFinite(source.minPowerKw, source.minimumPowerKw, source.minKw, source.minimumKw, source.rangeMinKw);
       const maxKw = firstFinite(source.maxPowerKw, source.maximumPowerKw, source.maxKw, source.capacityKw, source.ratingKw, source.powerRatingKw);
-      source.maxPowerKw = clamp(maxKw ?? Math.max(power ?? 0, 1000), 0, 10000);
+      const config = loadConfig(source);
+      source.maxPowerKw = clamp(maxKw ?? Math.max(power ?? 0, config.defaultMaxKw), MIN_POWER_KW + 1, config.capKw);
+      source.minPowerKw = minKw ?? (source.powerProfile === "variable" ? Math.max(MIN_POWER_KW, source.maxPowerKw * 0.2) : MIN_POWER_KW);
+      setNodePowerRange(source, source.minPowerKw, source.maxPowerKw);
       source.powerKw = clampNodePower(source, power ?? 0);
       source.batteryCapacityGJ = 0;
       source.batteryEnergyGJ = 0;
@@ -3090,9 +4079,11 @@
       const rateMw = firstFinite(source.batteryRateMw, source.rateMw, source.chargeRateMw, source.dischargeRateMw, source.chargeDischargeRateMw, source.charge_rate_mw);
       const rateKw = firstFinite(source.batteryRateKw, source.rateKw, source.chargeRateKw, source.dischargeRateKw, source.charge_rate_kw);
       source.batteryRateMw = clamp(rateMw ?? (rateKw != null ? rateKw / 1000 : DEFAULT_BATTERY_RATE_MW), 1, 40);
+      source.minPowerKw = 0;
       source.maxPowerKw = 0;
       source.powerKw = 0;
     } else {
+      source.minPowerKw = 0;
       source.maxPowerKw = finiteOr(source.maxPowerKw, 0);
       source.powerKw = finiteOr(source.powerKw, 0);
       source.batteryCapacityGJ = 0;
@@ -3125,7 +4116,8 @@
 
   function serializeGrid() {
     return {
-      version: 3,
+      version: 5,
+      worldSeed: state.worldSeed,
       nodes: state.nodes.map((node) => ({ ...node })),
       lines: state.lines.map((line) => ({ ...line })),
       nextNodeId: state.nextNodeId,
@@ -3143,7 +4135,7 @@
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `gridlab-${new Date().toISOString().slice(0, 10)}.json`;
+      link.download = `gridbox-${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -3173,6 +4165,7 @@
     try {
       stopSimulation("", false);
       const data = JSON.parse(raw);
+      resetWorld(data.worldSeed ?? (data.world && data.world.seed));
       const usedNodeIds = new Set();
       state.nodes = collectionItems(data.nodes).map((node, index) => {
         const normalized = normalizeNode(node, `N${index + 1}`);
@@ -3202,6 +4195,10 @@
       state.elapsedSeconds = Math.max(0, Math.floor(Number(data.elapsedSeconds) || 0));
       resetVariableProfileDrift();
       if (data.placement) {
+        state.placement.sourceType = SOURCE_TYPES[data.placement.sourceType] && data.placement.sourceType !== "generic" ? data.placement.sourceType : "wind";
+        state.placement.sourceRotation = Number(data.placement.sourceRotation) === 90 ? 90 : 0;
+        state.placement.loadType = LOAD_TYPES[data.placement.loadType] ? data.placement.loadType : "general";
+        state.placement.loadRotation = Number(data.placement.loadRotation) === 90 ? 90 : 0;
         state.placement.jointType = ["joint", "pole", "tower"].includes(data.placement.jointType) ? data.placement.jointType : "joint";
         state.placement.distributionVariant = LINE_VARIANTS[data.placement.distributionVariant] ? data.placement.distributionVariant : DEFAULT_LINE_VARIANT;
         state.placement.transmissionVariant = LINE_VARIANTS[data.placement.transmissionVariant] ? data.placement.transmissionVariant : DEFAULT_LINE_VARIANT;
@@ -3248,6 +4245,7 @@
 
   function loadDemo() {
     stopSimulation("", false);
+    resetWorld();
     state.nodes = [];
     state.lines = [];
     clearSelection(false);
@@ -3255,8 +4253,8 @@
     state.nodeClipboard = null;
     state.nextNodeId = 1;
     state.nextLineId = 1;
-    const n = (type, x, y, name, powerKw, maxPowerKw, display) => {
-      const node = nodeDefaults(type, x, y);
+    const n = (type, x, y, name, powerKw, maxPowerKw, display, sourceType) => {
+      const node = nodeDefaults(type, x, y, sourceType, type === "load" ? "general" : undefined);
       node.name = name;
       if (display) node.display = display;
       if (typeof powerKw === "number") node.powerKw = powerKw;
@@ -3265,15 +4263,15 @@
       state.nodes.push(node);
       return node;
     };
-    const solar = n("source", -340, -120, "North Plant", 8500, 20000);
-    const wind = n("source", -330, 170, "Wind Farm", 4800, 12000);
+    const solar = n("source", -340, -120, "North Solar", 8500, 20000, "", "solar");
+    const wind = n("source", -330, 170, "Wind Farm", 4800, 12000, "", "wind");
     const yardA = n("joint", -90, -40, "Yard A", 0, 0, "YA");
     const towerA = n("tower", 40, -40, "Tower T1");
     const yardB = n("joint", 170, -40, "Yard B", 0, 0, "YB");
     const subC = n("joint", 260, 190, "Substation C", 0, 0, "SC");
     const cityPole = n("pole", 310, -65, "City Pole");
-    const city = n("load", 420, -90, "City Load", 5600, 10000);
-    const mill = n("load", 460, 170, "Mill Load", 6500, 10000);
+    const city = n("load", 420, -90, "City Load", 5600, LOAD_POWER_CAP_KW);
+    const mill = n("load", 460, 170, "Mill Load", 6500, LOAD_POWER_CAP_KW);
     const battery = n("battery", 60, 210, "Battery Bank");
 
     const connect = (a, b, type, variant) => {
@@ -3308,6 +4306,7 @@
 
   function clearNetwork() {
     stopSimulation("", false);
+    resetWorld();
     state.nodes = [];
     state.lines = [];
     clearSelection(false);
@@ -3351,13 +4350,47 @@
   }
 
   function bindEvents() {
-    document.querySelectorAll(".tool-button[data-mode]").forEach((button) => {
+    document.querySelectorAll(".tool-button[data-mode]:not([data-picker-trigger]):not([data-joint-type])").forEach((button) => {
       button.addEventListener("click", () => setMode(button.dataset.mode));
+    });
+    document.querySelectorAll("[data-joint-type]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (state.running) return;
+        state.placement.jointType = button.dataset.jointType;
+        setMode("joint");
+      });
+    });
+    document.querySelectorAll("[data-picker-trigger]").forEach((button) => {
+      button.addEventListener("click", () => openPlacementPicker(button.dataset.pickerTrigger));
+    });
+    document.querySelectorAll("[data-picker-panel] [data-source-type]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (state.running || !SOURCE_TYPES[button.dataset.sourceType]) return;
+        state.placement.sourceType = button.dataset.sourceType;
+        setMode("source");
+      });
+    });
+    document.querySelectorAll("[data-picker-panel] [data-load-type]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (state.running || !LOAD_TYPES[button.dataset.loadType]) return;
+        state.placement.loadType = button.dataset.loadType;
+        setMode("load");
+      });
+    });
+    document.querySelectorAll("[data-picker-panel] [data-line-variant]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (state.running || !LINE_VARIANTS[button.dataset.lineVariant]) return;
+        const transmission = button.dataset.lineType === "transmission";
+        if (transmission) state.placement.transmissionVariant = button.dataset.lineVariant;
+        else state.placement.distributionVariant = button.dataset.lineVariant;
+        setMode(transmission ? "line-transmission" : "line-distribution");
+      });
     });
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
     canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("contextmenu", (event) => event.preventDefault());
     canvas.addEventListener("wheel", onWheel, { passive: false });
     runButton.addEventListener("click", startSimulation);
     demoButton.addEventListener("click", loadDemo);
@@ -3394,7 +4427,12 @@
       }
       if (event.key === "Escape") {
         state.connecting = null;
+        closePlacementPickers();
         setMode("select");
+      }
+      if (key === "q" && !command && !isTextEditingTarget(event.target)) {
+        event.preventDefault();
+        rotatePlaceableNodes();
       }
     });
   }
