@@ -3,9 +3,13 @@
 
   const canvas = document.getElementById("gridCanvas");
   let ctx = canvas.getContext("2d");
+  const backgroundLayerCanvas = document.createElement("canvas");
+  const backgroundLayerContext = backgroundLayerCanvas.getContext("2d");
+  let backgroundLayerValid = false;
   const networkLayerCanvas = document.createElement("canvas");
   const networkLayerContext = networkLayerCanvas.getContext("2d");
   let networkLayerValid = false;
+  const loadFillCache = new Map();
   const propertiesEl = document.getElementById("properties");
   const runButton = document.getElementById("runButton");
   const timeReadout = document.getElementById("timeReadout");
@@ -293,6 +297,7 @@
     lastTripCount: 0,
     nodeClipboard: null,
     worldSeed: window.GridboxWorld.randomSeed(),
+    worldGeneratorVersion: window.GridboxWorld.GENERATOR_VERSION,
     zoneOverlay: null,
     placement: {
       sourceType: "wind",
@@ -305,16 +310,36 @@
     }
   };
 
-  let world = window.GridboxWorld.create(state.worldSeed);
+  const performanceStats = {
+    solveCount: 0,
+    fastTickCount: 0,
+    lastSolveMs: 0,
+    lastFastTickMs: 0,
+    maximumSolveMs: 0
+  };
+  window.GridboxPerformance = Object.freeze({
+    snapshot() {
+      return { ...performanceStats };
+    }
+  });
 
-  function resetWorld(seed) {
+  let world = window.GridboxWorld.create(state.worldSeed, state.worldGeneratorVersion);
+
+  function resetWorld(seed, generatorVersion, expectedSignature = "") {
+    loadFillCache.clear();
+    backgroundLayerValid = false;
     if (Number.isFinite(Number(seed))) {
-      state.worldSeed = Math.floor(Number(seed)) >>> 0;
-      world = window.GridboxWorld.create(state.worldSeed);
+      const nextWorld = window.GridboxWorld.create(Math.floor(Number(seed)) >>> 0, generatorVersion);
+      if (expectedSignature && expectedSignature !== nextWorld.generatorSignature) {
+        throw new Error("This grid uses an incompatible world-generation revision. Update GRIDBOX before importing it.");
+      }
+      world = nextWorld;
+      state.worldSeed = nextWorld.seed;
+      state.worldGeneratorVersion = nextWorld.generatorVersion;
       return;
     }
     let candidateSeed = window.GridboxWorld.randomSeed();
-    let candidateWorld = window.GridboxWorld.create(candidateSeed);
+    let candidateWorld = window.GridboxWorld.create(candidateSeed, window.GridboxWorld.GENERATOR_VERSION);
     for (let attempt = 0; attempt < 18; attempt += 1) {
       let landSamples = 0;
       for (let sampleX = -500; sampleX <= 500; sampleX += 250) {
@@ -324,9 +349,10 @@
       }
       if (landSamples >= 17) break;
       candidateSeed = window.GridboxWorld.randomSeed();
-      candidateWorld = window.GridboxWorld.create(candidateSeed);
+      candidateWorld = window.GridboxWorld.create(candidateSeed, window.GridboxWorld.GENERATOR_VERSION);
     }
     state.worldSeed = candidateSeed;
+    state.worldGeneratorVersion = candidateWorld.generatorVersion;
     world = candidateWorld;
   }
 
@@ -450,6 +476,8 @@
     state.warnings = [];
     state.errors = [];
     state.lastTripCount = 0;
+    loadFillCache.clear();
+    invalidateSimulationGraph();
     resetSolution();
     setCanvasStatus(message || "Edited");
     updateTimeReadout();
@@ -496,14 +524,22 @@
     updateRunButton();
     updateTimeReadout();
     runSimulationStep({ advanceSeconds: 0, allowTrips: true });
-    state.runTimer = window.setInterval(() => {
+    scheduleSimulationStep();
+  }
+
+  function scheduleSimulationStep() {
+    if (!state.running) return;
+    state.runTimer = window.setTimeout(() => {
+      state.runTimer = null;
+      if (!state.running) return;
       runSimulationStep({ advanceSeconds: SIMULATION_STEP_SECONDS, allowTrips: true });
+      scheduleSimulationStep();
     }, SIMULATION_STEP_SECONDS * 1000);
   }
 
   function stopSimulation(message, shouldRender = true) {
     if (state.runTimer) {
-      window.clearInterval(state.runTimer);
+      window.clearTimeout(state.runTimer);
       state.runTimer = null;
     }
     state.running = false;
@@ -519,12 +555,16 @@
   let indexedLines = null;
   let indexedLineCount = -1;
   let lineById = new Map();
+  let incidentLinesByNode = new Map();
+  let simulationGraphRevision = 0;
+  let cachedSimulationGraph = null;
 
   function currentNodeIndex() {
     if (indexedNodes !== state.nodes || indexedNodeCount !== state.nodes.length) {
       indexedNodes = state.nodes;
       indexedNodeCount = state.nodes.length;
       nodeById = new Map(state.nodes.map((node) => [node.id, node]));
+      indexedLines = null;
     }
     return nodeById;
   }
@@ -534,6 +574,11 @@
       indexedLines = state.lines;
       indexedLineCount = state.lines.length;
       lineById = new Map(state.lines.map((line) => [line.id, line]));
+      incidentLinesByNode = new Map(state.nodes.map((node) => [node.id, []]));
+      state.lines.forEach((line) => {
+        if (incidentLinesByNode.has(line.from)) incidentLinesByNode.get(line.from).push(line);
+        if (incidentLinesByNode.has(line.to)) incidentLinesByNode.get(line.to).push(line);
+      });
     }
     return lineById;
   }
@@ -544,6 +589,18 @@
 
   function getLine(id) {
     return currentLineIndex().get(id);
+  }
+
+  function incidentLines(nodeId) {
+    currentNodeIndex();
+    currentLineIndex();
+    return incidentLinesByNode.get(nodeId) || [];
+  }
+
+  function invalidateSimulationGraph() {
+    simulationGraphRevision += 1;
+    cachedSimulationGraph = null;
+    networkLayerValid = false;
   }
 
   function nodeColor(type) {
@@ -937,10 +994,14 @@
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.max(1, Math.round(rect.width * dpr));
     canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    backgroundLayerCanvas.width = canvas.width;
+    backgroundLayerCanvas.height = canvas.height;
     networkLayerCanvas.width = canvas.width;
     networkLayerCanvas.height = canvas.height;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    backgroundLayerContext.setTransform(dpr, 0, 0, dpr, 0, 0);
     networkLayerContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    backgroundLayerValid = false;
     networkLayerValid = false;
     draw();
   }
@@ -965,6 +1026,7 @@
     const previousOverlay = state.zoneOverlay;
     closePlacementPickers();
     state.zoneOverlay = !wasOpen && ["source", "load"].includes(name) ? name : null;
+    if (previousOverlay !== state.zoneOverlay) backgroundLayerValid = false;
     if (!panel || wasOpen) {
       if (previousOverlay !== state.zoneOverlay) draw({ reuseNetwork: true });
       return;
@@ -1391,11 +1453,16 @@
   }
 
   function markDragEdited() {
-    state.lines.forEach(updateLineGeometry);
+    const touchedLines = new Set();
+    (state.pointer.dragStartPositions || []).forEach((start) => {
+      incidentLines(start.id).forEach((line) => touchedLines.add(line));
+    });
+    touchedLines.forEach(updateLineGeometry);
     state.dirty = true;
     state.solved = false;
     state.simulationNeedsSolve = true;
-    resetSolution();
+    invalidateSimulationGraph();
+    resetNumericsOnly();
     updateSummaries();
     renderProperties();
     draw();
@@ -1528,6 +1595,8 @@
     if (state.pointer.action === "pan") {
       state.camera.x += dx;
       state.camera.y += dy;
+      backgroundLayerValid = false;
+      networkLayerValid = false;
       draw();
     }
   }
@@ -1579,6 +1648,8 @@
     state.camera.scale = clamp(state.camera.scale * delta, MIN_ZOOM, MAX_ZOOM);
     state.camera.x = screen.x - before.x * state.camera.scale;
     state.camera.y = screen.y - before.y * state.camera.scale;
+    backgroundLayerValid = false;
+    networkLayerValid = false;
     renderAll();
   }
 
@@ -1589,7 +1660,26 @@
     state.camera.scale = clamp(state.camera.scale * factor, MIN_ZOOM, MAX_ZOOM);
     state.camera.x = screen.x - before.x * state.camera.scale;
     state.camera.y = screen.y - before.y * state.camera.scale;
+    backgroundLayerValid = false;
+    networkLayerValid = false;
     renderAll();
+  }
+
+  function paintBackgroundLayer(rect) {
+    const mainContext = ctx;
+    ctx = backgroundLayerContext;
+    try {
+      ctx.save();
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.fillStyle = colors.bg;
+      ctx.fillRect(0, 0, rect.width, rect.height);
+      world.draw(ctx, state.camera, rect, state.zoneOverlay);
+      drawGrid(rect);
+      ctx.restore();
+      backgroundLayerValid = true;
+    } finally {
+      ctx = mainContext;
+    }
   }
 
   function paintNetworkLayer(rect) {
@@ -1618,10 +1708,18 @@
     const rect = canvas.getBoundingClientRect();
     ctx.save();
     ctx.clearRect(0, 0, rect.width, rect.height);
-    ctx.fillStyle = colors.bg;
-    ctx.fillRect(0, 0, rect.width, rect.height);
-    world.draw(ctx, state.camera, rect, state.zoneOverlay);
-    drawGrid(rect);
+    if (!backgroundLayerValid) paintBackgroundLayer(rect);
+    ctx.drawImage(
+      backgroundLayerCanvas,
+      0,
+      0,
+      backgroundLayerCanvas.width,
+      backgroundLayerCanvas.height,
+      0,
+      0,
+      rect.width,
+      rect.height
+    );
     if (!options.reuseNetwork || !networkLayerValid) paintNetworkLayer(rect);
     ctx.drawImage(
       networkLayerCanvas,
@@ -1691,17 +1789,35 @@
   }
 
   function loadFillColor(node, pollutionIndex) {
-    let fill = loadConfig(node).fill;
+    const nearbyPollution = pollutionIndex.near(node.x, node.y);
     const size = loadVisualDimensions(node);
+    const cacheKey = [
+      state.worldSeed,
+      state.worldGeneratorVersion,
+      node.id,
+      node.loadType,
+      node.x,
+      node.y,
+      size.width,
+      size.height,
+      ...nearbyPollution.map((source) => `${source.id}:${source.sourceType}:${source.x}:${source.y}`)
+    ].join("|");
+    if (loadFillCache.has(cacheKey)) return loadFillCache.get(cacheKey);
+
+    let fill = loadConfig(node).fill;
     const zones = world.zoneMembership(node.x, node.y, size.width, size.height);
-    if (zones.industrial && !zones.residential && !zones.commercial) return fill;
-    pollutionIndex.near(node.x, node.y).forEach((source) => {
+    if (zones.industrial && !zones.residential && !zones.commercial) {
+      loadFillCache.set(cacheKey, fill);
+      return fill;
+    }
+    nearbyPollution.forEach((source) => {
       const half = source.sourceType === "coal" ? 150 : 100;
       if (Math.abs(node.x - source.x) > half || Math.abs(node.y - source.y) > half) return;
       fill = source.sourceType === "coal"
         ? mixColor(fill, [124, 82, 43], 0.28)
         : mixColor(fill, [82, 111, 70], 0.25);
     });
+    loadFillCache.set(cacheKey, fill);
     return fill;
   }
 
@@ -2207,8 +2323,7 @@
   function activeLevels(node) {
     let distribution = ["source", "load", "battery"].includes(node.type);
     let transmission = false;
-    state.lines.forEach((line) => {
-      if (line.from !== node.id && line.to !== node.id) return;
+    incidentLines(node.id).forEach((line) => {
       if (line.type === "distribution") distribution = true;
       if (line.type === "transmission") transmission = true;
     });
@@ -2232,6 +2347,7 @@
 
   function runSimulationStep(options = {}) {
     if (state.stepping) return;
+    const stepStarted = window.performance.now();
     state.stepping = true;
     const advanceSeconds = Number(options.advanceSeconds) || 0;
     const dispatchSeconds = Math.max(SIMULATION_STEP_SECONDS, advanceSeconds);
@@ -2242,15 +2358,15 @@
     }
     if (state.running && advanceSeconds > 0 && state.solved && !state.simulationNeedsSolve && canFastAdvanceBatteries(advanceSeconds)) {
       fastAdvanceSimulation(advanceSeconds, renderProperties, options.status);
+      performanceStats.fastTickCount += 1;
+      performanceStats.lastFastTickMs = window.performance.now() - stepStarted;
       state.stepping = false;
       return;
     }
     state.warnings = [];
     state.errors = [];
     state.lastTripCount = 0;
-    resetSolution();
     state.lines.forEach((line) => {
-      updateLineGeometry(line);
       if (!line.tripped) line.online = line.online !== false;
     });
 
@@ -2273,6 +2389,7 @@
         line.online = false;
         trippedThisSolve += 1;
       });
+      invalidateSimulationGraph();
     }
 
     state.lastTripCount = trippedThisSolve;
@@ -2294,10 +2411,26 @@
     updateSummaries();
     if (renderProperties && !isLivePowerControlFocused()) renderPropertiesView();
     draw();
+    performanceStats.solveCount += 1;
+    performanceStats.lastSolveMs = window.performance.now() - stepStarted;
+    performanceStats.maximumSolveMs = Math.max(performanceStats.maximumSolveMs, performanceStats.lastSolveMs);
   }
 
   function renderPropertiesView() {
     renderProperties();
+  }
+
+  function refreshFastRuntimeProperties() {
+    const node = selectedNode();
+    if (!node || node.type !== "battery") return;
+    const energyInput = document.getElementById("batteryEnergyGJ");
+    const reserve = document.getElementById("batteryReserveReadout");
+    const stateOfCharge = document.getElementById("batterySocReadout");
+    const power = document.getElementById("runtimeBatteryPower");
+    if (energyInput) energyInput.value = editableDecimal(batteryEnergyGJ(node), 4);
+    if (reserve) reserve.textContent = `${formatGJ(batteryEnergyGJ(node), 4)} / ${formatGJ(batteryCapacityGJ(node))}`;
+    if (stateOfCharge) stateOfCharge.textContent = formatPercent(batteryReserveFraction(node));
+    if (power) power.textContent = batteryText(node);
   }
 
   function isLivePowerControlFocused() {
@@ -2420,23 +2553,27 @@
   }
 
   function fastAdvanceSimulation(seconds, renderProperties, status) {
-    advanceBatteryEnergy(seconds);
+    const batteryDisplayChanged = advanceBatteryEnergy(seconds);
     state.elapsedSeconds += seconds;
     state.dirty = false;
     setCanvasStatus(status || "Running");
     updateTimeReadout();
     updateSummaries();
-    if (renderProperties && !isLivePowerControlFocused()) renderPropertiesView();
-    draw();
+    if (renderProperties && !isLivePowerControlFocused()) refreshFastRuntimeProperties();
+    draw({ reuseNetwork: !batteryDisplayChanged });
   }
 
   function advanceBatteryEnergy(seconds) {
+    let displayChanged = false;
     state.nodes.forEach((node) => {
       if (node.type !== "battery") return;
+      const previousDisplay = Math.round(batteryEnergyGJ(node));
       const capacity = batteryCapacityGJ(node);
       const deltaGJ = (node.batteryPowerKw || 0) * seconds / 1000000;
       node.batteryEnergyGJ = roundTo(clamp(batteryEnergyGJ(node) - deltaGJ, 0, capacity), 4);
+      displayChanged = displayChanged || Math.round(node.batteryEnergyGJ) !== previousDisplay;
     });
+    return displayChanged;
   }
 
   function resetNumericsOnly() {
@@ -2456,51 +2593,93 @@
       line.toPowerKw = 0;
       line.lossKw = 0;
       line.island = 0;
-      updateLineGeometry(line);
     });
   }
 
   function buildComponents() {
+    if (cachedSimulationGraph && cachedSimulationGraph.revision === simulationGraphRevision) {
+      cachedSimulationGraph.components.forEach((component) => {
+        component.nodes.forEach((node) => { node.island = component.index; });
+        component.lines.forEach((line) => { line.island = component.index; });
+      });
+      return cachedSimulationGraph.components;
+    }
+
     const adjacency = new Map();
     state.nodes.forEach((node) => adjacency.set(node.id, []));
+    const activeLines = [];
     state.lines.forEach((line) => {
       if (!line.online || line.tripped) return;
       if (!adjacency.has(line.from) || !adjacency.has(line.to)) return;
-      adjacency.get(line.from).push(line.to);
-      adjacency.get(line.to).push(line.from);
+      adjacency.get(line.from).push({ nodeId: line.to, line });
+      adjacency.get(line.to).push({ nodeId: line.from, line });
+      activeLines.push(line);
     });
 
     const visited = new Set();
     const components = [];
+    const componentByNodeId = new Map();
     state.nodes.forEach((start) => {
       if (visited.has(start.id)) return;
       const queue = [start.id];
+      let queueIndex = 0;
       const nodeIds = [];
       visited.add(start.id);
-      while (queue.length) {
-        const id = queue.shift();
+      while (queueIndex < queue.length) {
+        const id = queue[queueIndex++];
         nodeIds.push(id);
-        adjacency.get(id).forEach((next) => {
-          if (!visited.has(next)) {
-            visited.add(next);
-            queue.push(next);
+        adjacency.get(id).forEach((edge) => {
+          if (!visited.has(edge.nodeId)) {
+            visited.add(edge.nodeId);
+            queue.push(edge.nodeId);
           }
         });
       }
       const index = components.length + 1;
-      const lines = state.lines.filter((line) => {
-        return line.online && !line.tripped && nodeIds.includes(line.from) && nodeIds.includes(line.to);
-      });
-      nodeIds.forEach((id) => {
-        const node = getNode(id);
-        if (node) node.island = index;
-      });
-      lines.forEach((line) => {
-        line.island = index;
-      });
-      components.push({ index, nodeIds, lines });
+      const nodes = nodeIds.map(getNode).filter(Boolean);
+      const component = { index, nodeIds, nodes, lines: [], slack: chooseSlack(nodes) };
+      nodeIds.forEach((id) => componentByNodeId.set(id, component));
+      nodes.forEach((node) => { node.island = index; });
+      components.push(component);
     });
+
+    activeLines.forEach((line) => {
+      const component = componentByNodeId.get(line.from);
+      if (!component || component !== componentByNodeId.get(line.to)) return;
+      component.lines.push(line);
+      line.island = component.index;
+    });
+    components.forEach((component) => {
+      component.powerSystem = buildComponentSparseSystem(component, linePowerWeight);
+      component.voltageSystem = buildComponentSparseSystem(component, (line) => {
+        const ratio = line.type === "transmission" ? TRANSMISSION_RATIO : 1;
+        return (ratio * ratio) / Math.max(line.resistance, 0.0001);
+      });
+    });
+    cachedSimulationGraph = { revision: simulationGraphRevision, components };
     return components;
+  }
+
+  function buildComponentSparseSystem(component, weightForLine) {
+    const slack = component.slack;
+    const unknowns = component.nodes.filter((node) => node.id !== slack.id);
+    const indexByNodeId = new Map(unknowns.map((node, index) => [node.id, index]));
+    const boundaryWeight = new Float64Array(unknowns.length);
+    const connections = component.lines.map((line) => {
+      const from = indexByNodeId.has(line.from) ? indexByNodeId.get(line.from) : -1;
+      const to = indexByNodeId.has(line.to) ? indexByNodeId.get(line.to) : -1;
+      const weight = weightForLine(line);
+      if (from >= 0 && to < 0) boundaryWeight[from] += weight;
+      if (to >= 0 && from < 0) boundaryWeight[to] += weight;
+      return { from, to, weight };
+    });
+    return {
+      slack,
+      unknowns,
+      indexByNodeId,
+      boundaryWeight,
+      matrix: window.GridboxEngine.createGroundedLaplacian(unknowns.length, connections)
+    };
   }
 
   function addWarningOnce(message) {
@@ -2554,7 +2733,7 @@
   function prepareComponentPower(components, componentLossKw, options = {}) {
     const dispatchSeconds = Math.max(Number(options.dispatchSeconds) || SIMULATION_STEP_SECONDS, 1);
     components.forEach((component) => {
-      const nodes = component.nodeIds.map(getNode).filter(Boolean);
+      const nodes = component.nodes;
       const sources = nodes.filter((node) => node.type === "source");
       const loads = nodes.filter((node) => node.type === "load");
       const batteries = nodes.filter((node) => node.type === "battery");
@@ -2614,52 +2793,46 @@
 
   function solveVoltages(components) {
     components.forEach((component) => {
-      const nodes = component.nodeIds.map(getNode).filter(Boolean);
+      const nodes = component.nodes;
       nodes.forEach((node) => {
         if (!Number.isFinite(node.voltage)) node.voltage = BASE_VOLTAGE;
       });
       if (nodes.length === 0) return;
 
-      const slack = chooseSlack(nodes);
+      const system = component.voltageSystem;
+      const slack = system.slack;
       slack.voltage = BASE_VOLTAGE;
-      if (nodes.length === 1) return;
-
-      const unknowns = nodes.filter((node) => node.id !== slack.id);
-      const idx = new Map(unknowns.map((node, index) => [node.id, index]));
-      const n = unknowns.length;
+      const unknowns = system.unknowns;
+      if (!unknowns.length) return;
       let converged = false;
 
       for (let iteration = 0; iteration < 80; iteration += 1) {
         const oldVoltages = unknowns.map((node) => node.voltage);
-        const A = Array.from({ length: n }, () => Array(n).fill(0));
-        const B = Array(n).fill(0);
+        const B = new Float64Array(unknowns.length);
 
-        component.lines.forEach((line) => {
-          const from = getNode(line.from);
-          const to = getNode(line.to);
-          if (!from || !to) return;
-          const ratio = line.type === "transmission" ? TRANSMISSION_RATIO : 1;
-          const g = (ratio * ratio) / line.resistance;
-          stampConductance(A, B, idx, slack, from, to, g);
-        });
-
-        unknowns.forEach((node) => {
-          const i = idx.get(node.id);
+        unknowns.forEach((node, index) => {
           const vSafe = Math.max(Math.abs(node.voltage), 100);
-          B[i] += (node.effectivePowerKw * 1000) / vSafe;
+          B[index] = system.boundaryWeight[index] * slack.voltage + (node.effectivePowerKw * 1000) / vSafe;
         });
 
-        let solved;
+        let result;
         try {
-          solved = solveLinear(A, B);
+          result = window.GridboxEngine.solve(system.matrix, B, {
+            initial: Float64Array.from(oldVoltages),
+            relativeTolerance: 1e-10,
+            absoluteTolerance: 1e-5
+          });
         } catch (error) {
           state.errors.push(`Island ${component.index} could not be solved.`);
           return;
         }
+        if (!result.converged) {
+          addWarningOnce(`Island ${component.index} voltage solver reached its iteration limit.`);
+        }
 
         let maxDelta = 0;
         unknowns.forEach((node, index) => {
-          const next = clamp(solved[index], 500, 18000);
+          const next = clamp(result.values[index], 500, 18000);
           maxDelta = Math.max(maxDelta, Math.abs(next - oldVoltages[index]));
           node.voltage = next;
         });
@@ -2680,55 +2853,6 @@
       || nodes.find((node) => node.type === "battery")
       || nodes.find((node) => node.type === "joint")
       || nodes[0];
-  }
-
-  function stampConductance(A, B, idx, slack, from, to, g) {
-    const fromUnknown = idx.has(from.id);
-    const toUnknown = idx.has(to.id);
-
-    if (fromUnknown) {
-      const i = idx.get(from.id);
-      A[i][i] += g;
-      if (toUnknown) A[i][idx.get(to.id)] -= g;
-      else if (to.id === slack.id) B[i] += g * slack.voltage;
-    }
-
-    if (toUnknown) {
-      const i = idx.get(to.id);
-      A[i][i] += g;
-      if (fromUnknown) A[i][idx.get(from.id)] -= g;
-      else if (from.id === slack.id) B[i] += g * slack.voltage;
-    }
-  }
-
-  function solveLinear(A, b) {
-    const n = b.length;
-    const M = A.map((row, i) => row.concat(b[i]));
-    for (let col = 0; col < n; col += 1) {
-      let pivot = col;
-      for (let row = col + 1; row < n; row += 1) {
-        if (Math.abs(M[row][col]) > Math.abs(M[pivot][col])) pivot = row;
-      }
-      if (Math.abs(M[pivot][col]) < 1e-12) {
-        throw new Error("Singular matrix");
-      }
-      if (pivot !== col) {
-        const tmp = M[pivot];
-        M[pivot] = M[col];
-        M[col] = tmp;
-      }
-      const pivotValue = M[col][col];
-      for (let j = col; j <= n; j += 1) M[col][j] /= pivotValue;
-      for (let row = 0; row < n; row += 1) {
-        if (row === col) continue;
-        const factor = M[row][col];
-        if (Math.abs(factor) < 1e-18) continue;
-        for (let j = col; j <= n; j += 1) {
-          M[row][j] -= factor * M[col][j];
-        }
-      }
-    }
-    return M.map((row) => row[n]);
   }
 
   function computeLineFlows() {
@@ -2791,46 +2915,45 @@
   }
 
   function solveComponentPowerFlow(component, lossShareByNode) {
-      const nodes = component.nodeIds.map(getNode).filter(Boolean);
+      const nodes = component.nodes;
       if (!nodes.length || !component.lines.length) {
         component.lines.forEach((line) => setLinePower(line, 0, 0));
         return;
       }
-      const slack = chooseSlack(nodes);
-      const unknowns = nodes.filter((node) => node.id !== slack.id);
+      const system = component.powerSystem;
+      const slack = system.slack;
+      const unknowns = system.unknowns;
       if (!unknowns.length) {
         component.lines.forEach((line) => setLinePower(line, 0, 0));
         return;
       }
 
-      const idx = new Map(unknowns.map((node, index) => [node.id, index]));
-      const n = unknowns.length;
-      const A = Array.from({ length: n }, () => Array(n).fill(0));
-      const B = Array(n).fill(0);
+      const B = new Float64Array(unknowns.length);
 
-      component.lines.forEach((line) => {
-        const from = getNode(line.from);
-        const to = getNode(line.to);
-        if (!from || !to) return;
-        stampPowerWeight(A, idx, from, to, linePowerWeight(line));
+      unknowns.forEach((node, index) => {
+        B[index] = node.effectivePowerKw - (lossShareByNode.get(node.id) || 0);
       });
 
-      unknowns.forEach((node) => {
-        B[idx.get(node.id)] += node.effectivePowerKw - (lossShareByNode.get(node.id) || 0);
-      });
-
-      let solved;
+      let result;
       try {
-        solved = solveLinear(A, B);
+        result = window.GridboxEngine.solve(system.matrix, B, {
+          initial: Float64Array.from(unknowns, (node) => Number(node.powerAngle) || 0),
+          relativeTolerance: 1e-10,
+          absoluteTolerance: 1e-7
+        });
       } catch (error) {
         state.errors.push(`Island ${component.index} power flow could not be solved.`);
         component.lines.forEach((line) => setLinePower(line, 0, 0));
         return;
       }
+      if (!result.converged) {
+        addWarningOnce(`Island ${component.index} power-flow solver reached its iteration limit.`);
+      }
 
       const angle = new Map([[slack.id, 0]]);
       unknowns.forEach((node, index) => {
-        angle.set(node.id, solved[index]);
+        node.powerAngle = result.values[index];
+        angle.set(node.id, result.values[index]);
       });
 
       component.lines.forEach((line) => {
@@ -2880,23 +3003,6 @@
     line.toPowerKw = -line.powerKw + line.lossKw / 2;
   }
 
-  function stampPowerWeight(A, idx, from, to, weight) {
-    const fromUnknown = idx.has(from.id);
-    const toUnknown = idx.has(to.id);
-
-    if (fromUnknown) {
-      const i = idx.get(from.id);
-      A[i][i] += weight;
-      if (toUnknown) A[i][idx.get(to.id)] -= weight;
-    }
-
-    if (toUnknown) {
-      const i = idx.get(to.id);
-      A[i][i] += weight;
-      if (fromUnknown) A[i][idx.get(from.id)] -= weight;
-    }
-  }
-
   function computeNodeLineTotals() {
     state.nodes.forEach((node) => {
       node.lineNetKw = 0;
@@ -2913,7 +3019,7 @@
   function computeSubstationStepPower() {
     state.nodes.forEach((node) => {
       if (node.type !== "joint") return;
-      const incident = state.lines.filter((line) => {
+      const incident = incidentLines(node.id).filter((line) => {
         return line.online && !line.tripped && (line.from === node.id || line.to === node.id);
       });
       const distribution = incident.filter((line) => line.type === "distribution");
@@ -2951,6 +3057,7 @@
     state.dirty = true;
     state.solved = false;
     state.simulationNeedsSolve = true;
+    invalidateSimulationGraph();
     const message = status || `${targets.length} line${targets.length === 1 ? "" : "s"} tripped manually`;
     setCanvasStatus(message);
     if (state.running) {
@@ -2970,6 +3077,7 @@
     state.dirty = true;
     state.solved = false;
     state.simulationNeedsSolve = true;
+    invalidateSimulationGraph();
     const message = status || `${targets.length} line${targets.length === 1 ? "" : "s"} reclosed`;
     setCanvasStatus(message);
     if (state.running) {
@@ -3450,7 +3558,7 @@
 
   function renderNodeProperties(node) {
     const levels = activeLevels(node);
-    const incident = state.lines.filter((line) => line.from === node.id || line.to === node.id);
+    const incident = incidentLines(node.id);
     const slider = node.type === "source" || node.type === "load";
     const sliderTitle = node.type === "source" ? "Output" : "Demand";
     const maxCap = slider ? nodePowerCapKw(node) : 0;
@@ -3581,7 +3689,7 @@
         <div class="readout-list">
           ${levels.distribution ? `<div class="readout-row"><span class="readout-label">10 kV bus</span><span class="readout-value">${state.solved ? formatVoltage(node, "distribution") : "--"}</span></div>` : ""}
           ${levels.transmission ? `<div class="readout-row"><span class="readout-label">100 kV bus</span><span class="readout-value">${state.solved ? formatVoltage(node, "transmission") : "--"}</span></div>` : ""}
-          ${node.type === "battery" ? `<div class="readout-row"><span class="readout-label">Battery power</span><span class="readout-value">${batteryText(node)}</span></div>` : ""}
+          ${node.type === "battery" ? `<div class="readout-row"><span class="readout-label">Battery power</span><span class="readout-value" id="runtimeBatteryPower">${batteryText(node)}</span></div>` : ""}
           ${node.type === "source" ? `<div class="readout-row"><span class="readout-label">Generated</span><span class="readout-value">${state.solved ? formatKw(node.effectivePowerKw) : "--"}</span></div>` : ""}
           ${node.type === "load" ? `<div class="readout-row"><span class="readout-label">Served load</span><span class="readout-value">${state.solved ? formatKw(Math.max(0, -node.effectivePowerKw)) : "--"}</span></div>` : ""}
           <div class="readout-row"><span class="readout-label">Line net (+out)</span><span class="readout-value">${state.solved ? formatSignedKw(node.lineNetKw, 1) : "--"}</span></div>
@@ -4116,8 +4224,14 @@
 
   function serializeGrid() {
     return {
-      version: 5,
+      version: 6,
       worldSeed: state.worldSeed,
+      worldGeneratorVersion: state.worldGeneratorVersion,
+      world: {
+        seed: state.worldSeed,
+        generatorVersion: state.worldGeneratorVersion,
+        generatorSignature: world.generatorSignature
+      },
       nodes: state.nodes.map((node) => ({ ...node })),
       lines: state.lines.map((line) => ({ ...line })),
       nextNodeId: state.nextNodeId,
@@ -4161,11 +4275,70 @@
     });
   }
 
+  function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+    if (!value || typeof value !== "object") return JSON.stringify(value);
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+
+  function hashText32(text) {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash >>> 0;
+  }
+
+  function deterministicLegacyWorldSeed(data) {
+    return hashText32(canonicalJson({
+      nodes: data.nodes ?? data.grid?.nodes ?? [],
+      lines: data.lines ?? data.grid?.lines ?? []
+    }));
+  }
+
+  function firstPresentFinite() {
+    for (let index = 0; index < arguments.length; index += 1) {
+      const value = arguments[index];
+      if (value == null || value === "") continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+    }
+    return undefined;
+  }
+
+  function importedWorldDescriptor(data) {
+    const nested = data.world && typeof data.world === "object" ? data.world : {};
+    const seed = firstPresentFinite(
+      data.worldSeed,
+      nested.seed,
+      nested.worldSeed,
+      data.terrainSeed,
+      data.mapSeed,
+      data.seed
+    );
+    const generatorVersion = firstPresentFinite(
+      data.worldGeneratorVersion,
+      nested.generatorVersion,
+      nested.generator,
+      data.generatorVersion,
+      data.worldVersion
+    );
+    return {
+      seed: seed == null ? deterministicLegacyWorldSeed(data) : Math.floor(seed) >>> 0,
+      generatorVersion: generatorVersion == null ? window.GridboxWorld.GENERATOR_VERSION : Math.floor(generatorVersion),
+      generatorSignature: nested.generatorSignature ?? data.worldGeneratorSignature ?? "",
+      inferredSeed: seed == null,
+      inferredGeneratorVersion: generatorVersion == null
+    };
+  }
+
   function importGridText(raw) {
     try {
       stopSimulation("", false);
       const data = JSON.parse(raw);
-      resetWorld(data.worldSeed ?? (data.world && data.world.seed));
+      const worldDescriptor = importedWorldDescriptor(data);
+      resetWorld(worldDescriptor.seed, worldDescriptor.generatorVersion, worldDescriptor.generatorSignature);
       const usedNodeIds = new Set();
       state.nodes = collectionItems(data.nodes).map((node, index) => {
         const normalized = normalizeNode(node, `N${index + 1}`);
@@ -4204,13 +4377,22 @@
         state.placement.transmissionVariant = LINE_VARIANTS[data.placement.transmissionVariant] ? data.placement.transmissionVariant : DEFAULT_LINE_VARIANT;
       }
       state.camera = normalizeCamera(data.camera);
+      backgroundLayerValid = false;
+      loadFillCache.clear();
+      invalidateSimulationGraph();
       clearSelection(false);
       state.connecting = null;
       state.nodeClipboard = null;
       state.dirty = true;
       state.solved = false;
       state.simulationNeedsSolve = true;
-      state.warnings = skippedLines ? [`Skipped ${skippedLines} line${skippedLines === 1 ? "" : "s"} with missing endpoints.`] : [];
+      state.warnings = [];
+      if (skippedLines) state.warnings.push(`Skipped ${skippedLines} line${skippedLines === 1 ? "" : "s"} with missing endpoints.`);
+      if (worldDescriptor.inferredSeed) {
+        state.warnings.push("This legacy grid had no world seed. GRIDBOX assigned repeatable geography; export it again to lock the world descriptor.");
+      } else if (worldDescriptor.inferredGeneratorVersion) {
+        state.warnings.push("This legacy grid did not record its world generator version. GRIDBOX used the current compatible rules; export it again to lock the world descriptor.");
+      }
       state.errors = [];
       resetSolution();
       setMode("select");
@@ -4218,7 +4400,10 @@
       updateTimeReadout();
       renderAll();
     } catch (error) {
-      state.errors = ["Grid file could not be imported."];
+      const message = error instanceof Error && /world generator|world-generation/.test(error.message)
+        ? error.message
+        : "Grid file could not be imported.";
+      state.errors = [message];
       renderAll();
     }
   }
@@ -4291,6 +4476,9 @@
     connect(battery, subC, "distribution", "thin-1");
 
     state.camera = centerCameraForContent();
+    backgroundLayerValid = false;
+    loadFillCache.clear();
+    invalidateSimulationGraph();
     state.elapsedSeconds = 0;
     resetVariableProfileDrift();
     setMode("select");
@@ -4315,6 +4503,9 @@
     state.nextNodeId = 1;
     state.nextLineId = 1;
     state.camera = { x: canvas.getBoundingClientRect().width / 2, y: canvas.getBoundingClientRect().height / 2, scale: 1 };
+    backgroundLayerValid = false;
+    loadFillCache.clear();
+    invalidateSimulationGraph();
     state.elapsedSeconds = 0;
     resetVariableProfileDrift();
     state.dirty = true;
