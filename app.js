@@ -323,6 +323,10 @@
     }
   });
 
+  const activeTouchPointers = new Map();
+  let touchGesture = null;
+  let cameraDrawFrame = null;
+
   let world = window.GridboxWorld.create(state.worldSeed, state.worldGeneratorVersion);
 
   function resetWorld(seed, generatorVersion, expectedSignature = "") {
@@ -1476,7 +1480,265 @@
     };
   }
 
+  function scheduleCameraDraw() {
+    if (cameraDrawFrame != null) return;
+    cameraDrawFrame = window.requestAnimationFrame(() => {
+      cameraDrawFrame = null;
+      draw();
+    });
+  }
+
+  function resetPointerInteraction() {
+    state.pointer.down = false;
+    state.pointer.action = null;
+    state.pointer.dragNodeId = null;
+    state.pointer.dragNodeIds = [];
+    state.pointer.dragStartPositions = [];
+  }
+
+  function touchMidpoint(first, second) {
+    return { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+  }
+
+  function restoreTouchDrag(gesture) {
+    if (!gesture || gesture.kind !== "drag") return;
+    gesture.dragStartPositions.forEach((start) => {
+      const node = getNode(start.id);
+      if (!node) return;
+      node.x = start.x;
+      node.y = start.y;
+    });
+    gesture.touchedLines.forEach(updateLineGeometry);
+    networkLayerValid = false;
+  }
+
+  function beginPinchGesture() {
+    if (activeTouchPointers.size < 2) return;
+    restoreTouchDrag(touchGesture);
+    const pointers = Array.from(activeTouchPointers.entries()).slice(0, 2);
+    const first = pointers[0][1];
+    const second = pointers[1][1];
+    const midpoint = touchMidpoint(first, second);
+    touchGesture = {
+      kind: "pinch",
+      pointerIds: [pointers[0][0], pointers[1][0]],
+      startDistance: Math.max(1, distance(first.x, first.y, second.x, second.y)),
+      startScale: state.camera.scale,
+      anchorWorld: screenToWorld(midpoint.x, midpoint.y)
+    };
+    state.pointer.down = false;
+    state.pointer.action = "pinch";
+    state.pointer.lastScreen = null;
+  }
+
+  function updatePinchGesture() {
+    if (!touchGesture || touchGesture.kind !== "pinch") return;
+    const first = activeTouchPointers.get(touchGesture.pointerIds[0]);
+    const second = activeTouchPointers.get(touchGesture.pointerIds[1]);
+    if (!first || !second) return;
+    const midpoint = touchMidpoint(first, second);
+    const currentDistance = Math.max(1, distance(first.x, first.y, second.x, second.y));
+    const nextScale = clamp(
+      touchGesture.startScale * currentDistance / touchGesture.startDistance,
+      MIN_ZOOM,
+      MAX_ZOOM
+    );
+    state.camera.scale = nextScale;
+    state.camera.x = midpoint.x - touchGesture.anchorWorld.x * nextScale;
+    state.camera.y = midpoint.y - touchGesture.anchorWorld.y * nextScale;
+    backgroundLayerValid = false;
+    networkLayerValid = false;
+    scheduleCameraDraw();
+  }
+
+  function onTouchPointerDown(event) {
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    const screen = pointerPosition(event);
+    activeTouchPointers.set(event.pointerId, screen);
+    if (activeTouchPointers.size >= 2) {
+      beginPinchGesture();
+      return;
+    }
+
+    const worldPosition = screenToWorld(screen.x, screen.y);
+    const node = hitTestNode(worldPosition);
+    const line = hitTestLine(worldPosition);
+    touchGesture = {
+      kind: "pending",
+      pointerId: event.pointerId,
+      startScreen: screen,
+      lastScreen: screen,
+      startWorld: worldPosition,
+      nodeId: node ? node.id : null,
+      lineId: line ? line.id : null
+    };
+    state.pointer = {
+      down: true,
+      button: 0,
+      id: event.pointerId,
+      startScreen: screen,
+      lastScreen: screen,
+      startWorld: worldPosition,
+      action: "touch-pending",
+      dragNodeId: null,
+      dragNodeIds: [],
+      dragStartPositions: []
+    };
+  }
+
+  function beginSingleTouchMove(gesture) {
+    const node = gesture.nodeId ? getNode(gesture.nodeId) : null;
+    const line = gesture.lineId ? getLine(gesture.lineId) : null;
+    if (state.mode === "select" && !state.running && (node || line)) {
+      if (node && !isSelected("node", node.id)) selectItem("node", node.id);
+      if (line && !isSelected("line", line.id)) selectItem("line", line.id);
+      const dragNodes = nodesForSelectionDrag();
+      const touchedLines = new Set();
+      dragNodes.forEach((dragNode) => {
+        incidentLines(dragNode.id).forEach((connectedLine) => touchedLines.add(connectedLine));
+      });
+      gesture.kind = "drag";
+      gesture.dragStartPositions = dragNodes.map((dragNode) => ({ id: dragNode.id, x: dragNode.x, y: dragNode.y }));
+      gesture.touchedLines = touchedLines;
+      state.pointer.action = "drag-selection";
+      state.pointer.dragNodeIds = dragNodes.map((dragNode) => dragNode.id);
+      state.pointer.dragStartPositions = gesture.dragStartPositions;
+      return;
+    }
+    gesture.kind = "pan";
+    state.pointer.action = "pan";
+  }
+
+  function moveSingleTouch(gesture, screen) {
+    if (gesture.kind === "drag") {
+      const worldPosition = screenToWorld(screen.x, screen.y);
+      const dx = worldPosition.x - gesture.startWorld.x;
+      const dy = worldPosition.y - gesture.startWorld.y;
+      gesture.dragStartPositions.forEach((start) => {
+        const node = getNode(start.id);
+        if (!node) return;
+        node.x = snap(start.x + dx);
+        node.y = snap(start.y + dy);
+      });
+      gesture.touchedLines.forEach(updateLineGeometry);
+      networkLayerValid = false;
+      draw();
+      return;
+    }
+
+    const dx = screen.x - gesture.lastScreen.x;
+    const dy = screen.y - gesture.lastScreen.y;
+    state.camera.x += dx;
+    state.camera.y += dy;
+    backgroundLayerValid = false;
+    networkLayerValid = false;
+    scheduleCameraDraw();
+  }
+
+  function onTouchPointerMove(event) {
+    if (!activeTouchPointers.has(event.pointerId)) return;
+    event.preventDefault();
+    const screen = pointerPosition(event);
+    activeTouchPointers.set(event.pointerId, screen);
+    if (activeTouchPointers.size >= 2) {
+      if (!touchGesture || touchGesture.kind !== "pinch") beginPinchGesture();
+      updatePinchGesture();
+      return;
+    }
+    if (!touchGesture || touchGesture.pointerId !== event.pointerId || touchGesture.kind === "consumed") return;
+
+    if (touchGesture.kind === "pending") {
+      const movement = distance(
+        touchGesture.startScreen.x,
+        touchGesture.startScreen.y,
+        screen.x,
+        screen.y
+      );
+      if (movement < 6) return;
+      beginSingleTouchMove(touchGesture);
+    }
+    moveSingleTouch(touchGesture, screen);
+    touchGesture.lastScreen = screen;
+    state.pointer.lastScreen = screen;
+  }
+
+  function performTouchTap(gesture) {
+    const node = gesture.nodeId ? getNode(gesture.nodeId) : null;
+    const line = gesture.lineId ? getLine(gesture.lineId) : null;
+    if (state.mode.startsWith("line-")) {
+      if (node) handleLineClick(node);
+      return;
+    }
+    if (state.mode !== "select") {
+      addNode(state.mode, gesture.startWorld);
+      return;
+    }
+    if (node) {
+      selectItem("node", node.id);
+      return;
+    }
+    if (line) {
+      selectItem("line", line.id);
+      return;
+    }
+    selectItem(null, null);
+  }
+
+  function finishTouchDrag(gesture, cancelled) {
+    if (cancelled) {
+      restoreTouchDrag(gesture);
+      draw();
+      return;
+    }
+    const movedNodes = gesture.dragStartPositions.map((start) => getNode(start.id)).filter(Boolean);
+    const invalidNode = movedNodes.find((node) => validateNodePlacement(node));
+    if (invalidNode) {
+      const message = validateNodePlacement(invalidNode);
+      restoreTouchDrag(gesture);
+      setDirty(`${message}; move cancelled`);
+      return;
+    }
+    let powerAdjusted = false;
+    movedNodes.forEach((node) => {
+      if (node.type !== "source") return;
+      const next = clampNodePower(node, node.powerKw);
+      if (next === node.powerKw) return;
+      node.powerKw = next;
+      powerAdjusted = true;
+    });
+    setDirty(powerAdjusted ? "Renewable output adjusted for its new zone yield" : "Selection moved");
+  }
+
+  function onTouchPointerEnd(event) {
+    const cancelled = event.type === "pointercancel";
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    activeTouchPointers.delete(event.pointerId);
+
+    if (touchGesture && touchGesture.kind === "pinch") {
+      if (activeTouchPointers.size >= 2) beginPinchGesture();
+      else touchGesture = activeTouchPointers.size ? { kind: "consumed" } : null;
+      resetPointerInteraction();
+      return;
+    }
+    if (touchGesture && touchGesture.kind === "consumed") {
+      if (!activeTouchPointers.size) touchGesture = null;
+      resetPointerInteraction();
+      return;
+    }
+    if (!touchGesture || touchGesture.pointerId !== event.pointerId) return;
+
+    if (touchGesture.kind === "pending" && !cancelled) performTouchTap(touchGesture);
+    else if (touchGesture.kind === "drag") finishTouchDrag(touchGesture, cancelled);
+    touchGesture = null;
+    resetPointerInteraction();
+  }
+
   function onPointerDown(event) {
+    if (event.pointerType === "touch") {
+      onTouchPointerDown(event);
+      return;
+    }
     const panWithRightButton = event.button === 2;
     if (panWithRightButton) event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
@@ -1567,6 +1829,10 @@
   }
 
   function onPointerMove(event) {
+    if (event.pointerType === "touch") {
+      onTouchPointerMove(event);
+      return;
+    }
     if (!state.pointer.down) return;
     const screen = pointerPosition(event);
     const dx = screen.x - state.pointer.lastScreen.x;
@@ -1597,11 +1863,15 @@
       state.camera.y += dy;
       backgroundLayerValid = false;
       networkLayerValid = false;
-      draw();
+      scheduleCameraDraw();
     }
   }
 
   function onPointerUp(event) {
+    if (event.pointerType === "touch") {
+      onTouchPointerEnd(event);
+      return;
+    }
     const finishedDrag = state.pointer.action === "drag-selection" || state.pointer.action === "drag-node";
     const dragStarts = finishedDrag ? [...(state.pointer.dragStartPositions || [])] : [];
     if (canvas.hasPointerCapture(event.pointerId)) {
