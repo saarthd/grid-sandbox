@@ -145,5 +145,37 @@
     };
   }
 
-  return { createGroundedLaplacian, multiply, solve };
+  // kW sustained for one second per Hz of change, calibrated to the four rotor ratings.
+  const flywheels = Object.freeze([
+    { mass: 8000, radius: 2, inertia: 16000, diameter: 5, rate: 0.421 },
+    { mass: 12000, radius: 3, inertia: 54000, diameter: 10, rate: 0.125 },
+    { mass: 16000, radius: 4, inertia: 128000, diameter: 15, rate: 0.053 },
+    { mass: 20000, radius: 5, inertia: 250000, diameter: 20, rate: 0.027 }
+  ].map(model => Object.freeze({ ...model, kwSecondsPerHz: 1000 / model.rate })));
+
+  function flywheelModel(mass) {
+    return flywheels.find(model => model.mass === Number(mass)) || flywheels[0];
+  }
+
+  // Return the next relay transition in the direction the island is currently drifting.
+  function frequencyEvent(hz, slope, relay) {
+    if (slope === 0) return null;
+    let next, boundary;
+    if (slope > 0 && relay !== "high") {
+      next = relay === "low" ? "normal" : "high";
+      boundary = relay === "low" ? 59.2 : 61;
+    } else if (slope < 0 && relay !== "low") {
+      next = relay === "high" ? "normal" : "low";
+      boundary = relay === "high" ? 60.8 : 59;
+    } else {
+      return null;
+    }
+    return { next, seconds: Math.max(0, (boundary - hz) / slope) };
+  }
+
+  function visualRpm(hz) {
+    return 60 * 2 ** (hz - 60);
+  }
+
+  return { createGroundedLaplacian, multiply, solve, flywheels, flywheelModel, frequencyEvent, visualRpm };
 }));

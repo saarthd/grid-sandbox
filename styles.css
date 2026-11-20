@@ -543,6 +543,37 @@ svg text {
   background: #edf2f5;
 }
 
+.map-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+#alarmLayer:not([hidden]) { animation: grid-alarm 1s steps(1, end) infinite; }
+@keyframes grid-alarm { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  #alarmLayer:not([hidden]) { animation: none; }
+}
+.frequency-chip { font-variant-numeric: tabular-nums; }
+.frequency-panel { margin: 12px 0; padding: 12px; border-top: 1px solid var(--line); }
+.frequency-panel h3 { margin: 0; font-size: 14px; }
+.frequency-panel small, #frequencyLegend { color: var(--muted); font-size: 12px; }
+.frequency-panel svg { display: block; width: 100%; height: auto; stroke: none; margin-top: 6px; }
+.frequency-labels text { font-size: 9px; font-weight: 500; fill: var(--muted); }
+.frequency-guides path { stroke: var(--line); fill: none; }
+.frequency-labels { fill: var(--muted); font-size: 9px; }
+#frequencyLegend { display: grid; gap: 4px; max-height: 112px; overflow-y: auto; font-variant-numeric: tabular-nums; }
+#frequencyLegend span { padding-left: 7px; border-left: 3px solid; }
+.frequency-chip.warning { color: #a42d24; }
+.flywheel-choice { gap: 1px; align-content: center; font-size: 12px; }
+.flywheel-choice small { color: var(--muted); }
+.toolrail { overflow-y: auto; }
+@media (max-width: 640px) {
+  .top-actions { flex-wrap: wrap; }
+}
+
 #gridCanvas {
   display: block;
   width: 100%;

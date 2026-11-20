@@ -8,10 +8,23 @@
   let backgroundLayerValid = false;
   const networkLayerCanvas = document.createElement("canvas");
   const networkLayerContext = networkLayerCanvas.getContext("2d");
+  const rotorCtx = document.getElementById("rotorLayer").getContext("2d");
+  const alarmCtx = document.getElementById("alarmLayer").getContext("2d");
+  const transmissionCtx = document.getElementById("transmissionLayer").getContext("2d");
+  const rotorAngles = new WeakMap();
+  let visibleRotors = [];
+  let visibleLimitedNodes = [];
+  let rotorFrame = null;
+  let rotorTime = 0;
   let networkLayerValid = false;
   const loadFillCache = new Map();
   const propertiesEl = document.getElementById("properties");
   const runButton = document.getElementById("runButton");
+  const frequencyReadout = document.getElementById("frequencyReadout");
+  const frequencyHistory = [];
+  const traceColors = ["#126f67", "#ad482d", "#6555a6", "#1b73ae", "#9b7420", "#ac4275"];
+  const traceStyles = new Map();
+  const { flywheels, flywheelModel, frequencyEvent, visualRpm } = window.GridboxEngine;
   const timeReadout = document.getElementById("timeReadout");
   const demoButton = document.getElementById("demoButton");
   const saveButton = document.getElementById("saveButton");
@@ -28,6 +41,7 @@
   const solveBadge = document.getElementById("solveBadge");
 
   const CLICK_RADIUS_M = 5;
+  const SMALL_HIT_HALF_WIDTH_M = 1.5;
   const POLE_RADIUS_M = 1.6;
   const TOWER_SIZE_M = 8;
   const WATER_SURFACE_COLOR = "#65899d";
@@ -219,6 +233,7 @@
     battery: "battery",
     storage: "battery",
     bess: "battery",
+    flywheel: "flywheel",
     joint: "joint",
     substation: "joint",
     bus: "joint",
@@ -296,8 +311,6 @@
     errors: [],
     lastTripCount: 0,
     nodeClipboard: null,
-    worldSeed: window.GridboxWorld.randomSeed(),
-    worldGeneratorVersion: window.GridboxWorld.GENERATOR_VERSION,
     zoneOverlay: null,
     placement: {
       sourceType: "wind",
@@ -305,6 +318,8 @@
       loadType: "general",
       loadRotation: 0,
       jointType: "joint",
+      flywheelMass: 8000,
+      batteryRotation: 0,
       distributionVariant: DEFAULT_LINE_VARIANT,
       transmissionVariant: DEFAULT_LINE_VARIANT
     }
@@ -327,7 +342,7 @@
   let touchGesture = null;
   let cameraDrawFrame = null;
 
-  let world = window.GridboxWorld.create(state.worldSeed, state.worldGeneratorVersion);
+  let world = window.GridboxWorld.create(window.GridboxWorld.randomSeed());
 
   function resetWorld(seed, generatorVersion, expectedSignature = "") {
     loadFillCache.clear();
@@ -338,8 +353,6 @@
         throw new Error("This grid uses an incompatible world-generation revision. Update GRIDBOX before importing it.");
       }
       world = nextWorld;
-      state.worldSeed = nextWorld.seed;
-      state.worldGeneratorVersion = nextWorld.generatorVersion;
       return;
     }
     let candidateSeed = window.GridboxWorld.randomSeed();
@@ -355,8 +368,6 @@
       candidateSeed = window.GridboxWorld.randomSeed();
       candidateWorld = window.GridboxWorld.create(candidateSeed, window.GridboxWorld.GENERATOR_VERSION);
     }
-    state.worldSeed = candidateSeed;
-    state.worldGeneratorVersion = candidateWorld.generatorVersion;
     world = candidateWorld;
   }
 
@@ -375,6 +386,7 @@
       joint: "Substation",
       pole: "Pole",
       tower: "Tower",
+      flywheel: "Flywheel",
       load: `${loadConfig.label} Load`,
       battery: "Battery"
     };
@@ -382,6 +394,7 @@
     return {
       id: `N${id}`,
       type,
+      ...(type === "flywheel" ? { flywheelMass: state.placement.flywheelMass, frequencyHz: 60, frequencyRelay: "normal", rotorSpinning: false } : {}),
       name: `${labels[type]} ${id}`,
       display: type === "joint" ? `S${id % 10}` : "",
       x,
@@ -404,6 +417,7 @@
       batteryCapacityGJ: type === "battery" ? DEFAULT_BATTERY_CAPACITY_GJ : 0,
       batteryEnergyGJ: type === "battery" ? DEFAULT_BATTERY_CAPACITY_GJ / 2 : 0,
       batteryRateMw: type === "battery" ? DEFAULT_BATTERY_RATE_MW : 0,
+      ...(type === "battery" ? { batterySetpointMw: 0, batteryRotation: state.placement.batteryRotation } : {}),
       maxStepPowerKw: type === "joint" ? DEFAULT_SUBSTATION_MAX_STEP_KW : 0,
       steppedPowerKw: 0,
       lineNetKw: 0,
@@ -434,6 +448,8 @@
   }
 
   function resetSolution() {
+    frequencyHistory.length = 0;
+    renderFrequencyHistory();
     state.nodes.forEach((node) => {
       node.voltage = BASE_VOLTAGE;
       node.effectivePowerKw = 0;
@@ -822,6 +838,10 @@
     return ["variable", "varying", "automatic", "auto"].includes(key) ? "variable" : "constant";
   }
 
+  function requiresVariableProfile(node) {
+    return node.type === "source" && ["wind", "solar", "geothermal"].includes(node.sourceType);
+  }
+
   function normalizeSourceType(value, node) {
     const aliases = {
       wind: "wind",
@@ -883,17 +903,6 @@
 
   function loadTypeLabel(node) {
     return `${loadConfig(node).label} Load`;
-  }
-
-  function sourceProfileLocked(node) {
-    return Boolean(node && node.type === "source" && sourceConfig(node).profile);
-  }
-
-  function applyFixedSourceBehavior(node) {
-    if (!node || node.type !== "source") return;
-    const config = sourceConfig(node);
-    if (config.profile) node.powerProfile = config.profile;
-    if (config.profile === "variable") node.variabilityIndex = config.frequency;
   }
 
   function nodePowerCapKw(node) {
@@ -967,7 +976,7 @@
   function enforcePowerBounds() {
     state.nodes.forEach((node) => {
       if (!["source", "load"].includes(node.type)) return;
-      applyFixedSourceBehavior(node);
+      if (requiresVariableProfile(node)) node.powerProfile = "variable";
       setNodePowerRange(node, node.minPowerKw, node.maxPowerKw);
       node.powerKw = clampNodePower(node, node.powerKw);
     });
@@ -1005,6 +1014,11 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     backgroundLayerContext.setTransform(dpr, 0, 0, dpr, 0, 0);
     networkLayerContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    for (const layer of [rotorCtx, alarmCtx, transmissionCtx]) {
+      layer.canvas.width = canvas.width;
+      layer.canvas.height = canvas.height;
+      layer.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
     backgroundLayerValid = false;
     networkLayerValid = false;
     draw();
@@ -1052,6 +1066,9 @@
     document.querySelectorAll("[data-picker-panel] [data-load-type]").forEach((button) => {
       button.classList.toggle("active", button.dataset.loadType === state.placement.loadType);
     });
+    document.querySelectorAll("[data-flywheel-mass]").forEach(button => {
+      button.classList.toggle("active", Number(button.dataset.flywheelMass) === state.placement.flywheelMass);
+    });
     document.querySelectorAll("[data-picker-panel] [data-line-variant]").forEach((button) => {
       const selected = button.dataset.lineType === "transmission"
         ? state.placement.transmissionVariant
@@ -1084,6 +1101,7 @@
       joint: `Add ${jointTypeLabel(state.placement.jointType)}`,
       load: `Add ${LOAD_TYPES[state.placement.loadType].label} Load`,
       battery: "Add battery",
+      flywheel: `Add ${state.placement.flywheelMass.toLocaleString()} kg flywheel`,
       "line-distribution": `Draw 10 kV ${lineVariant({ variant: state.placement.distributionVariant }).label}`,
       "line-transmission": `Draw 100 kV ${lineVariant({ variant: state.placement.transmissionVariant }).label}`
     };
@@ -1201,7 +1219,7 @@
       return "100 kV lines connect substations or towers";
     }
     if (type === "distribution" && (!isDistributionEndpoint(from) || !isDistributionEndpoint(to))) {
-      return "10 kV lines connect poles, substations, sources, loads, or batteries";
+      return "10 kV lines connect poles, substations, sources, loads, batteries, or flywheels";
     }
     if (type === "distribution") {
       return "";
@@ -1298,6 +1316,7 @@
     const node = nodes[0];
     state.nodeClipboard = {
       type: node.type,
+      flywheelMass: node.flywheelMass,
       name: node.name,
       display: node.display || "",
       x: node.x,
@@ -1314,6 +1333,8 @@
       batteryCapacityGJ: node.batteryCapacityGJ || 0,
       batteryEnergyGJ: node.batteryEnergyGJ || 0,
       batteryRateMw: node.batteryRateMw || 0,
+      batteryRotation: node.batteryRotation,
+      batterySetpointMw: node.batterySetpointMw,
       maxStepPowerKw: node.maxStepPowerKw || 0
     };
     setCanvasStatus(`${node.name} copied`);
@@ -1332,6 +1353,7 @@
     const copied = state.nodeClipboard;
     const anchor = selectedNode() || copied;
     const node = nodeDefaults(copied.type, snap(anchor.x + 30), snap(anchor.y + 30), copied.sourceType, copied.loadType);
+    if (node.type === "flywheel") node.flywheelMass = flywheelModel(copied.flywheelMass).mass;
     node.name = uniqueNodeName(`${copied.name} copy`);
     node.display = copied.type === "joint" ? String(copied.display || copied.name).slice(0, 2).toUpperCase() : "";
     node.powerKw = Number(copied.powerKw) || 0;
@@ -1346,6 +1368,10 @@
     node.batteryCapacityGJ = Number(copied.batteryCapacityGJ) || 0;
     node.batteryEnergyGJ = Number(copied.batteryEnergyGJ) || 0;
     node.batteryRateMw = Number(copied.batteryRateMw) || 0;
+    if (node.type === "battery") {
+      node.batteryRotation = copied.batteryRotation || 0;
+      node.batterySetpointMw = copied.batterySetpointMw || 0;
+    }
     node.maxStepPowerKw = Number(copied.maxStepPowerKw) || 0;
     normalizeNode(node);
     const placementError = validateNodePlacement(node);
@@ -1374,6 +1400,7 @@
   function rotatePlaceableNodes() {
     if (state.running) return;
     const rotatableNodes = selectedNodes().filter((node) => {
+      if (node.type === "battery") return true;
       if (node.type === "source") return node.sourceType === "hydro";
       if (node.type !== "load") return false;
       const sizes = loadConfig(node).sizes;
@@ -1383,6 +1410,7 @@
     if (rotatableNodes.length) {
       rotatableNodes.forEach((node) => {
         if (node.type === "source") node.sourceRotation = Number(node.sourceRotation) === 90 ? 0 : 90;
+        else if (node.type === "battery") node.batteryRotation = node.batteryRotation === 90 ? 0 : 90;
         else node.loadRotation = Number(node.loadRotation) === 90 ? 0 : 90;
       });
       setDirty(`${rotatableNodes.length === 1 ? rotatableNodes[0].name : "Selected nodes"} rotated`);
@@ -1392,6 +1420,11 @@
       state.placement.sourceRotation = state.placement.sourceRotation === 90 ? 0 : 90;
       setCanvasStatus(`Hydroelectric placement rotated ${state.placement.sourceRotation} degrees`);
       draw();
+      return;
+    }
+    if (state.mode === "battery") {
+      state.placement.batteryRotation = state.placement.batteryRotation === 90 ? 0 : 90;
+      setCanvasStatus(`Battery placement rotated ${state.placement.batteryRotation} degrees`);
       return;
     }
     if (state.mode === "load") {
@@ -1404,9 +1437,14 @@
   function hitTestNode(world) {
     for (let i = state.nodes.length - 1; i >= 0; i--) {
       const node = state.nodes[i];
-      if (distance(world.x, world.y, node.x, node.y) <= CLICK_RADIUS_M) {
-        return node;
+      const dx = Math.abs(world.x - node.x), dy = Math.abs(world.y - node.y);
+      if (dx > CLICK_RADIUS_M || dy > CLICK_RADIUS_M) continue;
+      let small = node.type === "pole" || (node.type === "flywheel" && flywheelModel(node.flywheelMass).diameter <= 5);
+      if (node.type === "load") {
+        const size = loadVisualDimensions(node);
+        small = size.width <= 5 && size.height <= 5;
       }
+      if (small ? Math.max(dx, dy) <= SMALL_HIT_HALF_WIDTH_M : dx * dx + dy * dy <= CLICK_RADIUS_M ** 2) return node;
     }
     return null;
   }
@@ -1965,12 +2003,85 @@
       ctx.save();
       ctx.clearRect(0, 0, rect.width, rect.height);
       drawLines("distribution", false, renderState);
+      visibleRotors = [];
+      visibleLimitedNodes = [];
       drawNodes(renderState);
-      drawLines("transmission", true, renderState);
       ctx.restore();
+      ctx = transmissionCtx;
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      drawLines("transmission", true, renderState);
+      rotorCtx.clearRect(0, 0, rect.width, rect.height);
+      paintRotors(performance.now());
+      paintAlarmLayer(rect);
       networkLayerValid = true;
     } finally {
       ctx = mainContext;
+    }
+  }
+
+  function paintRotors(now) {
+    const dt = state.running && rotorTime ? Math.max(0, (now - rotorTime) / 1000) : 0;
+    rotorTime = Math.max(rotorTime, now);
+    for (const { p, radius } of visibleRotors) {
+      rotorCtx.clearRect(p.x - radius - 2, p.y - radius - 2, 2 * radius + 4, 2 * radius + 4);
+    }
+    for (const { node, p, radius } of visibleRotors) {
+      const angle = ((rotorAngles.get(node) || 0) + (state.running && node.rotorSpinning ? dt * TWO_PI * visualRpm(node.frequencyHz) / 60 : 0)) % TWO_PI;
+      rotorAngles.set(node, angle);
+      const arm = radius * 0.82;
+      const dx = arm * Math.cos(angle), dy = arm * Math.sin(angle);
+      rotorCtx.strokeStyle = "#151a1e";
+      rotorCtx.lineWidth = radius * 0.15;
+      rotorCtx.beginPath();
+      rotorCtx.moveTo(p.x - dx, p.y - dy);
+      rotorCtx.lineTo(p.x + dx, p.y + dy);
+      rotorCtx.moveTo(p.x + dy, p.y - dx);
+      rotorCtx.lineTo(p.x - dy, p.y + dx);
+      rotorCtx.stroke();
+    }
+    if (state.running && visibleRotors.some(r => r.node.rotorSpinning) && rotorFrame === null) {
+      rotorFrame = requestAnimationFrame(time => {
+        rotorFrame = null;
+        paintRotors(time);
+      });
+    }
+  }
+
+  function rotorAlarm(node) {
+    return state.running && node.rotorSpinning && (node.frequencyHz < 59.5 || node.frequencyHz > 60.5);
+  }
+
+  function paintAlarmLayer(rect) {
+    const previous = ctx;
+    ctx = alarmCtx;
+    try {
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      const scale = state.camera.scale;
+      ctx.strokeStyle = "#f77a0b";
+      ctx.lineWidth = 1.4 * scale;
+      for (const { node, p } of visibleLimitedNodes) {
+        if (node.type === "source") drawSourcePath(node, p, scale);
+        else {
+          const size = loadVisualDimensions(node);
+          ctx.beginPath();
+          ctx.rect(p.x - size.width * scale / 2, p.y - size.height * scale / 2, size.width * scale, size.height * scale);
+        }
+        ctx.stroke();
+      }
+      let active = visibleLimitedNodes.length > 0;
+      for (const rotor of visibleRotors) {
+        rotor.alarm = rotorAlarm(rotor.node);
+        if (!rotor.alarm) continue;
+        active = true;
+        ctx.strokeStyle = "#df3029";
+        ctx.lineWidth = rotor.radius * 0.22;
+        ctx.beginPath();
+        ctx.arc(rotor.p.x, rotor.p.y, rotor.radius, 0, TWO_PI);
+        ctx.stroke();
+      }
+      ctx.canvas.hidden = !active;
+    } finally {
+      ctx = previous;
     }
   }
 
@@ -1991,6 +2102,7 @@
       rect.height
     );
     if (!options.reuseNetwork || !networkLayerValid) paintNetworkLayer(rect);
+    else if (visibleRotors.some(rotor => rotor.alarm !== rotorAlarm(rotor.node))) paintAlarmLayer(rect);
     ctx.drawImage(
       networkLayerCanvas,
       0,
@@ -2062,8 +2174,8 @@
     const nearbyPollution = pollutionIndex.near(node.x, node.y);
     const size = loadVisualDimensions(node);
     const cacheKey = [
-      state.worldSeed,
-      state.worldGeneratorVersion,
+      world.seed,
+      world.generatorVersion,
       node.id,
       node.loadType,
       node.x,
@@ -2231,10 +2343,14 @@
     const capacityGJ = batteryCapacityGJ(node);
     const tier = BATTERY_SIZE_TIERS.find((item) => capacityGJ <= item.maximumGJ)
       || BATTERY_SIZE_TIERS[BATTERY_SIZE_TIERS.length - 1];
-    return { width: tier.width, height: tier.height };
+    return node.batteryRotation === 90 ? { width: tier.height, height: tier.width } : { width: tier.width, height: tier.height };
   }
 
   function nodeBoundaryDistanceM(node, ux, uy, offsetM) {
+    if (node.type === "flywheel") {
+      const radius = flywheelModel(node.flywheelMass).diameter / 2;
+      return Math.sqrt(Math.max(0, radius * radius - offsetM * offsetM));
+    }
     if (node.type === "pole") {
       const radius = POLE_RADIUS_M;
       return Math.sqrt(Math.max(0, radius * radius - offsetM * offsetM));
@@ -2347,6 +2463,8 @@
     state.nodes.forEach((node) => {
       const p = worldToScreen(node.x, node.y);
       if (!pointNearViewport(p, renderState.rect)) return;
+      if (node.type === "flywheel") visibleRotors.push({ node, p, radius: nodeVisualRadiusM(node) * state.camera.scale });
+      if (state.running && (node.curtailedKw > 0 || node.unservedKw > 0)) visibleLimitedNodes.push({ node, p });
       const selected = renderState.selectedKeys.has(`node:${node.id}`);
       const connecting = state.connecting && state.connecting.from === node.id;
       drawNodeShape(node, p, selected || connecting, renderState);
@@ -2378,7 +2496,14 @@
     ctx.strokeStyle = node.type === "tower" ? colors.towerLine : "#ffffff";
     ctx.lineWidth = (node.type === "source" ? 0.9 : 0.7) * scale;
 
-    if (node.type === "joint") {
+    if (node.type === "flywheel") {
+      const radius = nodeVisualRadiusM(node) * scale;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, radius, 0, TWO_PI);
+      ctx.fillStyle = "#fff";
+      ctx.strokeStyle = "#151a1e";
+      ctx.lineWidth = radius * 0.16;
+    } else if (node.type === "joint") {
       drawHexagon(p.x, p.y, substationSizeM(node) * scale / 2);
     } else if (node.type === "tower") {
       const size = TOWER_SIZE_M * scale;
@@ -2437,6 +2562,7 @@
   }
 
   function nodeVisualRadiusM(node) {
+    if (node.type === "flywheel") return flywheelModel(node.flywheelMass).diameter / 2;
     if (node.type === "source") {
       const size = sourceVisualDimensions(node);
       return Math.hypot(size.width, size.height) / 2;
@@ -2591,7 +2717,7 @@
   }
 
   function activeLevels(node) {
-    let distribution = ["source", "load", "battery"].includes(node.type);
+    let distribution = ["source", "load", "battery", "flywheel"].includes(node.type);
     let transmission = false;
     incidentLines(node.id).forEach((line) => {
       if (line.type === "distribution") distribution = true;
@@ -2617,81 +2743,156 @@
 
   function runSimulationStep(options = {}) {
     if (state.stepping) return;
-    const stepStarted = window.performance.now();
     state.stepping = true;
+    try {
+      stepGrid(options);
+    } finally {
+      state.stepping = false;
+    }
+  }
+
+  function stepGrid(options) {
+    const stepStarted = window.performance.now();
     const advanceSeconds = Number(options.advanceSeconds) || 0;
     const dispatchSeconds = Math.max(SIMULATION_STEP_SECONDS, advanceSeconds);
     const allowTrips = options.allowTrips !== false;
-    const renderProperties = options.renderProperties !== false;
     if (state.running && advanceSeconds > 0 && updateVariableProfiles(advanceSeconds)) {
       state.simulationNeedsSolve = true;
     }
-    if (state.running && advanceSeconds > 0 && state.solved && !state.simulationNeedsSolve && canFastAdvanceBatteries(advanceSeconds)) {
-      fastAdvanceSimulation(advanceSeconds, renderProperties, options.status);
-      performanceStats.fastTickCount += 1;
-      performanceStats.lastFastTickMs = window.performance.now() - stepStarted;
-      state.stepping = false;
-      return;
-    }
-    state.warnings = [];
-    state.errors = [];
-    state.lastTripCount = 0;
-    state.lines.forEach((line) => {
-      if (!line.tripped) line.online = line.online !== false;
-    });
+    let solvedThisTick = false;
+    let tripCount = 0;
+    const solve = (horizon = dispatchSeconds, changedIslands = null) => {
+      tripCount += solveOperatingPoint(horizon, allowTrips, changedIslands);
+      solvedThisTick = true;
+    };
+    if (state.simulationNeedsSolve || !cachedSimulationGraph || !state.solved || !canFastAdvanceBatteries(advanceSeconds)) solve();
 
-    let pass = 0;
-    let trippedThisSolve = 0;
-    while (pass < 10) {
-      pass += 1;
-      state.warnings = [];
-      state.errors = [];
-      resetNumericsOnly();
-      const components = buildComponents();
-      computePowerFlows(components, { dispatchSeconds });
-      solveVoltages(components);
-      const overloads = state.lines.filter((line) => {
-        return line.online && !line.tripped && Math.abs(line.currentA) > lineCurrentLimitA(line) + 0.01;
-      });
-      if (!allowTrips || !overloads.length) break;
-      overloads.forEach((line) => {
-        line.tripped = true;
-        line.online = false;
-        trippedThisSolve += 1;
-      });
-      invalidateSimulationGraph();
+    // Integrate cached dispatch up to the first relay crossing, then use the new dispatch
+    // for the rest of the second. Loss iterations and zero-time edits never advance a rotor.
+    let remaining = advanceSeconds;
+    let batteryDisplayChanged = false;
+    while (remaining > 0) {
+      let duration = remaining;
+      const events = [];
+      for (const island of cachedSimulationGraph.rotatingIslands) {
+        const event = frequencyEvent(island.hz, island.slope, island.relay);
+        if (event && event.seconds <= remaining) {
+          events.push({ island, ...event });
+          duration = Math.min(duration, event.seconds);
+        }
+      }
+      for (const island of cachedSimulationGraph.rotatingIslands) {
+        island.hz += island.slope * duration;
+        for (const wheel of island.wheels) wheel.frequencyHz = island.hz;
+      }
+      batteryDisplayChanged = advanceBatteryEnergy(duration) || batteryDisplayChanged;
+      remaining -= duration;
+      if (events.length) {
+        const changedIslands = [];
+        for (const event of events) {
+          if (event.seconds > duration + 1e-9) continue;
+          event.island.relay = event.next;
+          for (const wheel of event.island.wheels) wheel.frequencyRelay = event.next;
+          changedIslands.push(event.island);
+        }
+        solve(remaining > 1e-9 ? remaining : dispatchSeconds, changedIslands);
+      }
     }
-
-    state.lastTripCount = trippedThisSolve;
-    computeNodeLineTotals();
-    computeSubstationStepPower();
-    if (advanceSeconds > 0) {
-      advanceBatteryEnergy(advanceSeconds);
-      state.elapsedSeconds += advanceSeconds;
-    }
+    state.elapsedSeconds += advanceSeconds;
+    sampleFrequencyHistory();
+    if (solvedThisTick) state.lastTripCount = tripCount;
     state.solved = true;
     state.dirty = false;
     state.simulationNeedsSolve = Boolean(options.keepSolvePending);
-    if (trippedThisSolve) {
-      state.warnings.push(`${trippedThisSolve} line${trippedThisSolve === 1 ? "" : "s"} tripped above its current rating.`);
+    if (tripCount) {
+      state.warnings.push(`${tripCount} line${tripCount === 1 ? "" : "s"} tripped above its current rating.`);
     }
-    setCanvasStatus(options.status || (trippedThisSolve ? "Running with trips" : "Running"));
-    state.stepping = false;
+    setCanvasStatus(options.status || (tripCount ? "Running with trips" : "Running"));
     updateTimeReadout();
-    updateSummaries();
-    if (renderProperties && !isLivePowerControlFocused()) renderPropertiesView();
-    draw();
-    performanceStats.solveCount += 1;
-    performanceStats.lastSolveMs = window.performance.now() - stepStarted;
-    performanceStats.maximumSolveMs = Math.max(performanceStats.maximumSolveMs, performanceStats.lastSolveMs);
+    if (solvedThisTick) updateSummaries();
+    else {
+      updateFrequencyReadout();
+      if (cachedSimulationGraph.batteries.length) {
+        const energy = cachedSimulationGraph.batteries.reduce((sum, node) => sum + batteryEnergyGJ(node), 0);
+        updateReserveSummary(energy);
+      }
+    }
+    if (options.renderProperties !== false && !isLivePowerControlFocused()) {
+      if (solvedThisTick) renderProperties();
+      else refreshFastRuntimeProperties();
+    }
+    if (solvedThisTick || batteryDisplayChanged || !networkLayerValid) draw();
+    else if (visibleRotors.some(rotor => rotor.alarm !== rotorAlarm(rotor.node))) {
+      paintAlarmLayer(canvas.getBoundingClientRect());
+    }
+    if (solvedThisTick) {
+      performanceStats.solveCount += 1;
+      performanceStats.lastSolveMs = window.performance.now() - stepStarted;
+      performanceStats.maximumSolveMs = Math.max(performanceStats.maximumSolveMs, performanceStats.lastSolveMs);
+    } else {
+      performanceStats.fastTickCount += 1;
+      performanceStats.lastFastTickMs = window.performance.now() - stepStarted;
+    }
   }
 
-  function renderPropertiesView() {
-    renderProperties();
+  function solveOperatingPoint(dispatchSeconds, allowTrips, changedIslands) {
+    let trips = 0;
+    // A frequency relay only changes its own island. A line trip changes connectivity.
+    while (true) {
+      if (!changedIslands) resetNumericsOnly();
+      const components = changedIslands ? cachedSimulationGraph.components : buildComponents();
+      const overloads = [];
+      for (const component of changedIslands || components) {
+        state.warnings = component.warnings = [];
+        state.errors = component.errors = [];
+        computePowerFlows(component, dispatchSeconds);
+        if (component.wheels.length) {
+          component.active = component.lines.length > 0 && (component.sources.some(n => n.powerKw > 0)
+            || component.batteries.some(n => Math.abs(n.batteryPowerKw) > 0)
+            || component.wheels.some(n => Math.abs(n.effectivePowerKw) > 0));
+        }
+        if (allowTrips) {
+          for (const line of component.lines) {
+            if (Math.abs(line.currentA) > lineCurrentLimitA(line) + 0.01) overloads.push(line);
+          }
+        }
+        if (!overloads.length) {
+          solveVoltages([component]);
+          computeNodeLineTotals(component.nodes, component.lines);
+          computeSubstationStepPower(component.nodes);
+        }
+      }
+      if (!overloads.length) {
+        // Commit mechanical state only after trips settle. A rejected dispatch cannot spin up a cold rotor.
+        for (const island of changedIslands || components) {
+          for (const wheel of island.wheels) {
+            wheel.frequencyHz = island.hz;
+            wheel.frequencyRelay = island.relay;
+            wheel.rotorActive = island.active;
+            if (island.active) wheel.rotorSpinning = true;
+          }
+        }
+        state.warnings = components.flatMap(c => c.warnings);
+        state.errors = components.flatMap(c => c.errors);
+        return trips;
+      }
+      for (const line of overloads) {
+        line.tripped = true;
+        line.online = false;
+      }
+      trips += overloads.length;
+      invalidateSimulationGraph();
+      changedIslands = null;
+    }
   }
 
   function refreshFastRuntimeProperties() {
     const node = selectedNode();
+    if (node?.type === "flywheel") {
+      document.getElementById("rotorFrequency").textContent = flywheelFrequencyText(node);
+      document.getElementById("mechanicalRpm").textContent = formatRpm(node.rotorSpinning ? node.frequencyHz : 0);
+      return;
+    }
     if (!node || node.type !== "battery") return;
     const energyInput = document.getElementById("batteryEnergyGJ");
     const reserve = document.getElementById("batteryReserveReadout");
@@ -2705,7 +2906,7 @@
 
   function isLivePowerControlFocused() {
     if (!state.running || !document.activeElement) return false;
-    return ["powerSlider", "powerNumber", "bulkPowerNumber"].includes(document.activeElement.id);
+    return ["powerSlider", "powerNumber", "bulkPowerNumber", "batteryCommand", "batteryCommandSlider"].includes(document.activeElement.id);
   }
 
   function updateVariableProfiles(advanceSeconds) {
@@ -2812,35 +3013,22 @@
   }
 
   function canFastAdvanceBatteries(seconds) {
-    return state.nodes.every((node) => {
-      if (node.type !== "battery") return true;
+    return cachedSimulationGraph.batteries.every((node) => {
       const powerKw = Number(node.batteryPowerKw) || 0;
       if (Math.abs(powerKw) < 0.05) return true;
       const capacity = batteryCapacityGJ(node);
       const nextEnergy = batteryEnergyGJ(node) - powerKw * seconds / 1000000;
-      return nextEnergy >= -1e-6 && nextEnergy <= capacity + 1e-6;
+      return nextEnergy >= -1e-12 && nextEnergy <= capacity + 1e-12;
     });
-  }
-
-  function fastAdvanceSimulation(seconds, renderProperties, status) {
-    const batteryDisplayChanged = advanceBatteryEnergy(seconds);
-    state.elapsedSeconds += seconds;
-    state.dirty = false;
-    setCanvasStatus(status || "Running");
-    updateTimeReadout();
-    updateSummaries();
-    if (renderProperties && !isLivePowerControlFocused()) refreshFastRuntimeProperties();
-    draw({ reuseNetwork: !batteryDisplayChanged });
   }
 
   function advanceBatteryEnergy(seconds) {
     let displayChanged = false;
-    state.nodes.forEach((node) => {
-      if (node.type !== "battery") return;
+    cachedSimulationGraph.batteries.forEach((node) => {
       const previousDisplay = Math.round(batteryEnergyGJ(node));
       const capacity = batteryCapacityGJ(node);
       const deltaGJ = (node.batteryPowerKw || 0) * seconds / 1000000;
-      node.batteryEnergyGJ = roundTo(clamp(batteryEnergyGJ(node) - deltaGJ, 0, capacity), 4);
+      node.batteryEnergyGJ = clamp(batteryEnergyGJ(node) - deltaGJ, 0, capacity);
       displayChanged = displayChanged || Math.round(node.batteryEnergyGJ) !== previousDisplay;
     });
     return displayChanged;
@@ -2920,13 +3108,39 @@
       line.island = component.index;
     });
     components.forEach((component) => {
+      component.sources = component.nodes.filter(node => node.type === "source");
+      component.loads = component.nodes.filter(node => node.type === "load");
+      component.batteries = component.nodes.filter(node => node.type === "battery");
+      component.wheels = component.nodes.filter(node => node.type === "flywheel");
+      if (component.wheels.length) {
+        component.traceKey = JSON.stringify(component.wheels.map(w => w.id).sort());
+        const storage = w => flywheelModel(w.flywheelMass).kwSecondsPerHz;
+        component.storagePerHz = component.wheels.reduce((sum, w) => sum + storage(w), 0);
+        // Synchronization conserves angular momentum, including that of coasting rotors.
+        const reference = component.wheels.filter(w => w.rotorSpinning);
+        const baseHz = reference[0]?.frequencyHz ?? 60;
+        let inertia = 0, weightedDelta = 0;
+        for (const wheel of reference) {
+          const weight = flywheelModel(wheel.flywheelMass).inertia;
+          inertia += weight;
+          weightedDelta += weight * (wheel.frequencyHz - baseHz);
+        }
+        component.hz = baseHz + (inertia ? weightedDelta / inertia : 0);
+        component.relay = "normal";
+        if (component.hz >= 61 || (component.hz > 60.8 && reference.some(w => w.frequencyRelay === "high"))) component.relay = "high";
+        if (component.hz <= 59 || (component.hz < 59.2 && reference.some(w => w.frequencyRelay === "low"))) component.relay = "low";
+      }
       component.powerSystem = buildComponentSparseSystem(component, linePowerWeight);
       component.voltageSystem = buildComponentSparseSystem(component, (line) => {
         const ratio = line.type === "transmission" ? TRANSMISSION_RATIO : 1;
         return (ratio * ratio) / Math.max(line.resistance, 0.0001);
       });
     });
-    cachedSimulationGraph = { revision: simulationGraphRevision, components };
+    cachedSimulationGraph = {
+      revision: simulationGraphRevision, components,
+      rotatingIslands: components.filter(c => c.wheels.length),
+      batteries: components.flatMap(c => c.batteries)
+    };
     return components;
   }
 
@@ -2961,7 +3175,7 @@
   }
 
   function batteryEnergyGJ(node) {
-    return roundTo(clamp(Number(node.batteryEnergyGJ) || 0, 0, batteryCapacityGJ(node)), 4);
+    return clamp(Number(node.batteryEnergyGJ) || 0, 0, batteryCapacityGJ(node));
   }
 
   function batteryRateKw(node) {
@@ -2974,91 +3188,84 @@
   }
 
   function batteryAvailableDischargeKw(node, seconds) {
-    const byEnergy = batteryEnergyGJ(node) * 1000000 / Math.max(seconds, 1);
+    const byEnergy = batteryEnergyGJ(node) * 1000000 / seconds;
     return Math.max(0, Math.min(batteryRateKw(node), byEnergy));
   }
 
   function batteryAvailableChargeKw(node, seconds) {
-    const byCapacity = (batteryCapacityGJ(node) - batteryEnergyGJ(node)) * 1000000 / Math.max(seconds, 1);
+    const byCapacity = (batteryCapacityGJ(node) - batteryEnergyGJ(node)) * 1000000 / seconds;
     return Math.max(0, Math.min(batteryRateKw(node), byCapacity));
   }
 
-  function allocateBatteryPower(batteries, requiredKw, seconds) {
-    if (!batteries.length || Math.abs(requiredKw) < 0.05) return 0;
-    const discharge = requiredKw > 0;
-    const capacityByNode = batteries.map((node) => {
-      return discharge ? batteryAvailableDischargeKw(node, seconds) : batteryAvailableChargeKw(node, seconds);
+  function prepareComponentPower(component, targetLossKw, dispatchSeconds, report) {
+    const { sources, loads, batteries, wheels } = component;
+    const sourceKw = sources.reduce((sum, node) => sum + node.powerKw, 0);
+    const loadKw = loads.reduce((sum, node) => sum + node.powerKw, 0);
+
+    sources.forEach((node) => {
+      node.effectivePowerKw = node.powerKw;
+      node.curtailedKw = 0;
     });
-    const totalAvailable = capacityByNode.reduce((sum, value) => sum + value, 0);
-    const fulfilled = Math.min(Math.abs(requiredKw), totalAvailable);
-    if (fulfilled <= 0.05 || totalAvailable <= 0.05) return 0;
-    batteries.forEach((node, index) => {
-      const share = fulfilled * (capacityByNode[index] / totalAvailable);
-      node.batteryPowerKw = discharge ? share : -share;
+    loads.forEach((node) => {
+      node.effectivePowerKw = -node.powerKw;
+      node.unservedKw = 0;
+    });
+    const net = sourceKw - loadKw;
+    for (const node of batteries) {
+      const requested = (node.batterySetpointMw || 0) * 1000;
+      node.batteryPowerKw = component.lines.length ? clamp(requested, -batteryAvailableChargeKw(node, dispatchSeconds),
+        batteryAvailableDischargeKw(node, dispatchSeconds)) : 0;
       node.effectivePowerKw = node.batteryPowerKw;
-    });
-    return discharge ? fulfilled : -fulfilled;
-  }
+    }
 
-  function prepareComponentPower(components, componentLossKw, options = {}) {
-    const dispatchSeconds = Math.max(Number(options.dispatchSeconds) || SIMULATION_STEP_SECONDS, 1);
-    components.forEach((component) => {
-      const nodes = component.nodes;
-      const sources = nodes.filter((node) => node.type === "source");
-      const loads = nodes.filter((node) => node.type === "load");
-      const batteries = nodes.filter((node) => node.type === "battery");
-      const sourceKw = sources.reduce((sum, node) => sum + node.powerKw, 0);
-      const loadKw = loads.reduce((sum, node) => sum + node.powerKw, 0);
-      const targetLossKw = componentLossKw ? componentLossKw.get(component.index) || 0 : 0;
-
-      sources.forEach((node) => {
-        node.effectivePowerKw = node.powerKw;
-        node.curtailedKw = 0;
-      });
-      loads.forEach((node) => {
-        node.effectivePowerKw = -node.powerKw;
-        node.unservedKw = 0;
-      });
-      batteries.forEach((node) => {
-        node.batteryPowerKw = 0;
-        node.effectivePowerKw = 0;
-      });
-
-      const net = sourceKw - loadKw;
-      if (batteries.length) {
-        const requiredBatteryKw = targetLossKw - net;
-        const batteryKw = allocateBatteryPower(batteries, requiredBatteryKw, dispatchSeconds);
-        const shortfallKw = Math.abs(requiredBatteryKw) - Math.abs(batteryKw);
-        if (shortfallKw > 0.05) {
-          const direction = requiredBatteryKw > 0 ? "discharge" : "charge";
-          addWarningOnce(`Island ${component.index} battery ${direction} limited by reserve, capacity, or rate.`);
-        }
+    const requiredNet = targetLossKw;
+    const batteryKw = batteries.reduce((sum, node) => sum + node.batteryPowerKw, 0);
+    let mismatch = net + batteryKw - requiredNet;
+    const energized = component.lines.length && (sourceKw > 0 || batteries.some(n => n.batteryPowerKw > 0)
+      || wheels.some(w => w.rotorSpinning));
+    if (wheels.length && energized) {
+      const limit = mismatch > 0 ? "high" : "low";
+      component.slope = component.relay === limit || Math.abs(mismatch) < 0.05 ? 0 : mismatch / component.storagePerHz;
+      for (const wheel of wheels) {
+        wheel.effectivePowerKw = -component.slope * flywheelModel(wheel.flywheelMass).kwSecondsPerHz;
       }
+      if (component.slope !== 0) return;
+    } else if (wheels.length) {
+      component.slope = 0;
+      for (const wheel of wheels) wheel.effectivePowerKw = 0;
+    }
+    if (Math.abs(mismatch) < 0.05) return;
 
-      const requiredNet = targetLossKw;
-      const batteryKw = batteries.reduce((sum, node) => sum + node.batteryPowerKw, 0);
-      const mismatch = net + batteryKw - requiredNet;
+    // At protection, back off batteries worsening the imbalance before cutting service.
+    const adverse = batteries.filter(node => node.batteryPowerKw * mismatch > 0);
+    const available = adverse.reduce((sum, node) => sum + node.batteryPowerKw, 0);
+    if (available) {
+      const fraction = Math.min(1, mismatch / available);
+      for (const node of adverse) {
+        node.batteryPowerKw *= 1 - fraction;
+        node.effectivePowerKw = node.batteryPowerKw;
+      }
+      mismatch -= available * fraction;
       if (Math.abs(mismatch) < 0.05) return;
-
-      if (mismatch > 0.05) {
-        const curtailed = Math.min(mismatch, sourceKw);
-        // Runtime profile affects the setpoint, not dispatch eligibility: all sources share curtailment.
-        sources.forEach((node) => {
-          const share = sourceKw > 0 ? curtailed * (node.powerKw / sourceKw) : 0;
-          node.curtailedKw = share;
-          node.effectivePowerKw = Math.max(0, node.powerKw - share);
-        });
-        addWarningOnce(`Island ${component.index} curtailed ${formatKw(curtailed)} after losses.`);
-      } else {
-        const deficit = Math.min(-mismatch, loadKw);
-        loads.forEach((node) => {
-          const share = loadKw > 0 ? deficit * (node.powerKw / loadKw) : 0;
-          node.unservedKw = share;
-          node.effectivePowerKw = -Math.max(0, node.powerKw - share);
-        });
-        addWarningOnce(`Island ${component.index} has ${formatKw(deficit)} unserved load after losses.`);
-      }
-    });
+    }
+    if (mismatch > 0.05) {
+      const curtailed = Math.min(mismatch, sourceKw);
+      // Runtime profile affects the setpoint, not dispatch eligibility: all sources share curtailment.
+      sources.forEach((node) => {
+        const share = sourceKw > 0 ? curtailed * (node.powerKw / sourceKw) : 0;
+        node.curtailedKw = share;
+        node.effectivePowerKw = Math.max(0, node.powerKw - share);
+      });
+      if (report) addWarningOnce(`Island ${component.index} curtailed ${formatKw(curtailed)} after losses.`);
+    } else {
+      const deficit = Math.min(-mismatch, loadKw);
+      loads.forEach((node) => {
+        const share = loadKw > 0 ? deficit * (node.powerKw / loadKw) : 0;
+        node.unservedKw = share;
+        node.effectivePowerKw = -Math.max(0, node.powerKw - share);
+      });
+      if (report) addWarningOnce(`Island ${component.index} has ${formatKw(deficit)} unserved load after losses.`);
+    }
   }
 
   function solveVoltages(components) {
@@ -3147,41 +3354,19 @@
     });
   }
 
-  function computePowerFlows(components, options = {}) {
-    state.lines.forEach((line) => {
-      if (!line.online || line.tripped) {
-        line.currentA = 0;
-        line.powerKw = 0;
-        line.fromPowerKw = 0;
-        line.toPowerKw = 0;
-        line.lossKw = 0;
-      }
-    });
-
-    let componentLossKw = new Map(components.map((component) => [component.index, 0]));
-    let previousMaxDelta = Infinity;
-
+  function computePowerFlows(component, dispatchSeconds) {
+    let loss = 0, previousDelta = Infinity;
     for (let iteration = 0; iteration < 16; iteration += 1) {
-      prepareComponentPower(components, componentLossKw, options);
-      const lossShareByNode = buildLossShareByNode(components);
-      components.forEach((component) => solveComponentPowerFlow(component, lossShareByNode));
-
-      const nextLossKw = new Map();
-      let maxDelta = 0;
-      components.forEach((component) => {
-        const total = component.lines.reduce((sum, line) => sum + line.lossKw, 0);
-        nextLossKw.set(component.index, total);
-        maxDelta = Math.max(maxDelta, Math.abs(total - (componentLossKw.get(component.index) || 0)));
-      });
-
-      componentLossKw = nextLossKw;
-      if (maxDelta < 0.02 || Math.abs(maxDelta - previousMaxDelta) < 0.001) break;
-      previousMaxDelta = maxDelta;
+      prepareComponentPower(component, loss, dispatchSeconds, false);
+      solveComponentPowerFlow(component, buildLossShareByNode(component));
+      const next = component.lines.reduce((sum, line) => sum + line.lossKw, 0);
+      const delta = Math.abs(next - loss);
+      loss = next;
+      if (delta < 0.02 || Math.abs(delta - previousDelta) < 0.001) break;
+      previousDelta = delta;
     }
-
-    prepareComponentPower(components, componentLossKw, options);
-    const lossShareByNode = buildLossShareByNode(components);
-    components.forEach((component) => solveComponentPowerFlow(component, lossShareByNode));
+    prepareComponentPower(component, loss, dispatchSeconds, true);
+    solveComponentPowerFlow(component, buildLossShareByNode(component));
   }
 
   function solveComponentPowerFlow(component, lossShareByNode) {
@@ -3240,14 +3425,11 @@
     return (voltage * voltage) / Math.max(line.resistance, 0.0001);
   }
 
-  function buildLossShareByNode(components) {
-    const shares = new Map(state.nodes.map((node) => [node.id, 0]));
-    components.forEach((component) => {
-      component.lines.forEach((line) => {
-        if (!line.online || line.tripped) return;
-        shares.set(line.from, (shares.get(line.from) || 0) + line.lossKw / 2);
-        shares.set(line.to, (shares.get(line.to) || 0) + line.lossKw / 2);
-      });
+  function buildLossShareByNode(component) {
+    const shares = new Map();
+    component.lines.forEach((line) => {
+      shares.set(line.from, (shares.get(line.from) || 0) + line.lossKw / 2);
+      shares.set(line.to, (shares.get(line.to) || 0) + line.lossKw / 2);
     });
     return shares;
   }
@@ -3273,11 +3455,11 @@
     line.toPowerKw = -line.powerKw + line.lossKw / 2;
   }
 
-  function computeNodeLineTotals() {
-    state.nodes.forEach((node) => {
+  function computeNodeLineTotals(nodes, lines) {
+    nodes.forEach((node) => {
       node.lineNetKw = 0;
     });
-    state.lines.forEach((line) => {
+    lines.forEach((line) => {
       if (!line.online || line.tripped) return;
       const from = getNode(line.from);
       const to = getNode(line.to);
@@ -3286,8 +3468,8 @@
     });
   }
 
-  function computeSubstationStepPower() {
-    state.nodes.forEach((node) => {
+  function computeSubstationStepPower(nodes) {
+    nodes.forEach((node) => {
       if (node.type !== "joint") return;
       const incident = incidentLines(node.id).filter((line) => {
         return line.online && !line.tripped && (line.from === node.id || line.to === node.id);
@@ -3476,7 +3658,6 @@
     const commonFrequency = slider ? commonValue(nodes, variabilityIndex) : "";
     const commonSourceType = type === "source" ? commonValue(nodes, (node) => node.sourceType || "generic") : "";
     const commonLoadType = type === "load" ? commonValue(nodes, (node) => node.loadType || "general") : "";
-    const profileLocked = type === "source" && nodes.some(sourceProfileLocked);
     const powerLocked = state.running && nodes.some((node) => node.powerProfile === "variable");
     const minimumFloor = slider ? powerRangeFloorKw(nodes[0]) : 0;
     const commonMinimum = commonMin === "" ? minimumFloor : Number(commonMin);
@@ -3493,6 +3674,8 @@
           <label for="bulkNodeName">Name</label>
           <input id="bulkNodeName" type="text" value="${escapeAttr(nameValue)}" placeholder="${nameValue === "" ? "Mixed names" : ""}"${locked ? " disabled" : ""}>
         </div>
+        ${type === "flywheel" ? flywheelControls(nodes) : ""}
+        ${type === "battery" ? batteryCommandControls(nodes) : ""}
         ${type === "joint" ? `
           <div class="field">
             <label for="bulkNodeDisplay">Display</label>
@@ -3512,8 +3695,8 @@
           <div class="field">
             <label>Runtime behavior</label>
             <div class="segmented">
-              <button type="button" data-bulk-power-profile="constant" class="${commonProfile === "constant" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Constant</button>
-              <button type="button" data-bulk-power-profile="variable" class="${commonProfile === "variable" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Variable</button>
+              <button type="button" data-bulk-power-profile="constant" class="${commonProfile === "constant" ? "active" : ""}"${locked || nodes.some(requiresVariableProfile) ? " disabled" : ""}>Constant</button>
+              <button type="button" data-bulk-power-profile="variable" class="${commonProfile === "variable" ? "active" : ""}"${locked || nodes.every(requiresVariableProfile) ? " disabled" : ""}>Variable</button>
             </div>
           </div>
           ${commonProfile === "variable" ? `
@@ -3522,7 +3705,7 @@
                 <label for="bulkVariabilityIndex">Frequency index</label>
                 <span class="field-value" id="bulkVariabilityReadout">${commonFrequency === "" ? "Mixed" : commonFrequency}</span>
               </div>
-              <input id="bulkVariabilityIndex" type="range" min="1" max="10" step="1" value="${commonFrequency === "" ? DEFAULT_VARIABILITY_INDEX : commonFrequency}"${locked || profileLocked ? " disabled" : ""}>
+              <input id="bulkVariabilityIndex" type="range" min="1" max="10" step="1" value="${commonFrequency === "" ? DEFAULT_VARIABILITY_INDEX : commonFrequency}"${locked ? " disabled" : ""}>
             </div>
           ` : ""}
           <div class="field">
@@ -3632,6 +3815,8 @@
   }
 
   function bindMultiProperties(nodes, lines) {
+    bindFlywheelModel(nodes);
+    if (!lines.length && nodes.length && nodes.every(n => n.type === "battery")) bindBatteryCommand(nodes);
     const nodeName = document.getElementById("bulkNodeName");
     if (nodeName) {
       nodeName.addEventListener("input", (event) => {
@@ -3682,7 +3867,7 @@
 
     propertiesEl.querySelectorAll("[data-bulk-power-profile]").forEach((button) => {
       button.addEventListener("click", () => {
-        if (state.running || nodes.some(sourceProfileLocked)) return;
+        if (state.running || (button.dataset.bulkPowerProfile === "constant" && nodes.some(requiresVariableProfile))) return;
         nodes.forEach((node) => {
           node.powerProfile = button.dataset.bulkPowerProfile;
           ensureVariationState(node);
@@ -3764,14 +3949,16 @@
 
     const batteryRate = document.getElementById("bulkBatteryRateMw");
     if (batteryRate) {
-      batteryRate.addEventListener("input", (event) => {
+      batteryRate.addEventListener("change", (event) => {
         if (state.running) return;
         const next = clamp(Number(event.target.value) || 1, 1, 40);
         nodes.forEach((node) => {
           node.batteryRateMw = next;
+          node.batterySetpointMw = clamp(node.batterySetpointMw || 0, -next, next);
         });
         markOperatingEdit("Selection battery max rate updated");
       });
+      batteryRate.addEventListener("change", renderProperties);
     }
 
     const batteryEnergy = document.getElementById("bulkBatteryEnergyGJ");
@@ -3826,6 +4013,87 @@
     if (deleteInline) deleteInline.addEventListener("click", removeSelection);
   }
 
+  function formatFrequency(hz) {
+    return `${hz.toFixed(2)} Hz`;
+  }
+
+  function flywheelFrequencyText(node) {
+    if (!node.rotorSpinning) return "Offline";
+    return formatFrequency(node.frequencyHz) + (node.rotorActive ? "" : " (coasting)");
+  }
+
+  function formatRpm(hz) {
+    return `${(15 * hz).toFixed(1)} rpm`;
+  }
+
+  function flywheelControls(nodes) {
+    const mass = commonValue(nodes, node => node.flywheelMass);
+    const options = flywheels.map(model => `<option value="${model.mass}"${mass === model.mass ? " selected" : ""}>${model.mass.toLocaleString()} kg / ${model.radius} m</option>`).join("");
+    return `<div class="field"><label for="flywheelModel">Rotor mass / radius</label>
+      <select id="flywheelModel"${state.running ? " disabled" : ""}>${mass === "" ? '<option selected disabled>Mixed models</option>' : ""}${options}</select></div>`;
+  }
+
+  function bindFlywheelModel(nodes) {
+    const select = document.getElementById("flywheelModel");
+    if (!select) return;
+    select.addEventListener("change", () => {
+      if (state.running) return;
+      for (const node of nodes) node.flywheelMass = flywheelModel(select.value).mass;
+      setDirty("Flywheel model updated");
+    });
+  }
+
+  function dispatchLimitKw(node) {
+    return Math.floor(batteryRateKw(node) + 1e-8);
+  }
+
+  function dispatchPosition(mw, limitKw) {
+    return Math.sign(mw) * Math.round(Math.min(1, Math.abs(mw) * 1000 / limitKw) * 50);
+  }
+
+  function sliderDispatchMw(position, limitKw) {
+    return Math.sign(position) * Math.round(Math.abs(position) * limitKw / 50) / 1000;
+  }
+
+  function batteryCommandControls(nodes) {
+    const limit = commonValue(nodes, n => batteryRateKw(n) / 1000);
+    if (limit === "" || commonValue(nodes, batteryCapacityGJ) === "") {
+      return '<div class="field">Dispatch requires matching capacity and max rate.</div>';
+    }
+    const value = commonValue(nodes, n => n.batterySetpointMw || 0);
+    const position = dispatchPosition(value || 0, dispatchLimitKw(nodes[0]));
+    return `<div class="field"><label for="batteryCommand">Dispatch (MW)</label>
+      <input type="range" aria-label="Battery dispatch" aria-valuetext="${value === "" ? "Mixed" : value + " MW"}" id="batteryCommandSlider" min="-50" max="50" step="1" value="${position}">
+      <div class="field-row"><small>Charge (&minus;)</small><small>Discharge (+)</small></div>
+      <input type="number" id="batteryCommand" min="-${limit}" max="${limit}" step="0.001" value="${value}" placeholder="Mixed"></div>`;
+  }
+
+  function bindBatteryCommand(nodes) {
+    const input = document.getElementById("batteryCommand");
+    const slider = document.getElementById("batteryCommandSlider");
+    if (!input || !slider) return;
+    const commit = raw => {
+      if (raw === "" || !Number.isFinite(Number(raw))) return;
+      const limit = dispatchLimitKw(nodes[0]);
+      const mw = clamp(Math.sign(raw) * Math.round(Math.abs(raw) * 1000), -limit, limit) / 1000;
+      for (const node of nodes) node.batterySetpointMw = mw;
+      input.value = mw;
+      slider.value = dispatchPosition(mw, limit);
+      slider.ariaValueText = mw + " MW";
+      markOperatingEdit("Battery dispatch updated");
+      renderProperties();
+    };
+    const sliderMw = () => sliderDispatchMw(Number(slider.value), dispatchLimitKw(nodes[0]));
+    slider.addEventListener("input", () => {
+      input.value = sliderMw();
+      slider.ariaValueText = input.value + " MW";
+    });
+    slider.addEventListener("change", () => commit(sliderMw()));
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); commit(input.value); }
+    });
+  }
+
   function renderNodeProperties(node) {
     const levels = activeLevels(node);
     const incident = incidentLines(node.id);
@@ -3842,7 +4110,6 @@
     const flowRows = incident.map((line) => flowRowHtml(line, node.id)).join("");
     const locked = state.running;
     const powerLocked = state.running && profile === "variable";
-    const profileLocked = sourceProfileLocked(node);
 
     propertiesEl.innerHTML = `
       <div class="prop-group">
@@ -3858,6 +4125,14 @@
           ${node.type === "load" ? `<div class="readout-row"><span class="readout-label">Load type</span><span class="readout-value">${escapeHtml(loadTypeLabel(node))}</span></div>` : ""}
           <div class="readout-row"><span class="readout-label">Position</span><span class="readout-value">${Math.round(node.x)}, ${Math.round(node.y)} m</span></div>
         </div>
+        ${node.type === "flywheel" ? `
+          ${flywheelControls([node])}
+          <div class="readout-list">
+            <div class="readout-row"><span class="readout-label">Inertia</span><span class="readout-value">${flywheelModel(node.flywheelMass).inertia.toLocaleString()} kg&middot;m&sup2;</span></div>
+            <div class="readout-row"><span class="readout-label">Frequency</span><span class="readout-value" id="rotorFrequency">${flywheelFrequencyText(node)}</span></div>
+            <div class="readout-row"><span class="readout-label">8-pole rotor speed</span><span class="readout-value" id="mechanicalRpm">${formatRpm(node.rotorSpinning ? node.frequencyHz : 0)}</span></div>
+            <div class="readout-row"><span class="readout-label">Flywheel power</span><span class="readout-value">${state.solved ? (node.effectivePowerKw > 0.05 ? "Supplying " : node.effectivePowerKw < -0.05 ? "Absorbing " : "") + formatKw(Math.abs(node.effectivePowerKw)) : "--"}</span></div>
+          </div>` : ""}
         ${node.type === "joint" ? `
           <div class="field" style="margin-top: 13px;">
             <label for="nodeDisplay">Display</label>
@@ -3871,8 +4146,8 @@
           <div class="field">
             <label>Runtime behavior</label>
             <div class="segmented">
-              <button type="button" data-power-profile="constant" class="${profile === "constant" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Constant</button>
-              <button type="button" data-power-profile="variable" class="${profile === "variable" ? "active" : ""}"${locked || profileLocked ? " disabled" : ""}>Variable</button>
+              <button type="button" data-power-profile="constant" class="${profile === "constant" ? "active" : ""}"${locked || requiresVariableProfile(node) ? " disabled" : ""}>Constant</button>
+              <button type="button" data-power-profile="variable" class="${profile === "variable" ? "active" : ""}"${locked || requiresVariableProfile(node) ? " disabled" : ""}>Variable</button>
             </div>
           </div>
           ${profile === "variable" ? `
@@ -3881,7 +4156,7 @@
                 <label for="variabilityIndex">Frequency index</label>
                 <span class="field-value" id="variabilityReadout">${variabilityIndex(node)}</span>
               </div>
-              <input id="variabilityIndex" type="range" min="1" max="10" step="1" value="${variabilityIndex(node)}"${locked || profileLocked ? " disabled" : ""}>
+              <input id="variabilityIndex" type="range" min="1" max="10" step="1" value="${variabilityIndex(node)}"${locked ? " disabled" : ""}>
             </div>
           ` : ""}
           <div class="field">
@@ -3911,6 +4186,7 @@
       ${node.type === "battery" ? `
         <div class="prop-group">
           <h3>Battery</h3>
+          ${batteryCommandControls([node])}
           <div class="field">
             <div class="field-row">
               <label for="batteryCapacityGJ">Capacity</label>
@@ -3978,6 +4254,8 @@
       </div>
     `;
 
+    bindFlywheelModel([node]);
+    if (node.type === "battery") bindBatteryCommand([node]);
     document.getElementById("nodeName").addEventListener("input", (event) => {
       node.name = event.target.value || node.id;
       state.dirty = true;
@@ -4024,7 +4302,7 @@
       const readout = document.getElementById("powerReadout");
       propertiesEl.querySelectorAll("[data-power-profile]").forEach((button) => {
         button.addEventListener("click", () => {
-          if (state.running || sourceProfileLocked(node)) return;
+          if (state.running || (button.dataset.powerProfile === "constant" && requiresVariableProfile(node))) return;
           node.powerProfile = button.dataset.powerProfile;
           ensureVariationState(node);
           node.powerKw = clampNodePower(node, node.powerKw);
@@ -4035,7 +4313,7 @@
       const variability = document.getElementById("variabilityIndex");
       if (variability) {
         variability.addEventListener("input", (event) => {
-          if (state.running || sourceProfileLocked(node)) return;
+          if (state.running) return;
           node.variabilityIndex = clamp(Math.round(Number(event.target.value) || DEFAULT_VARIABILITY_INDEX), 1, 10);
           const variabilityReadout = document.getElementById("variabilityReadout");
           if (variabilityReadout) variabilityReadout.textContent = String(node.variabilityIndex);
@@ -4132,9 +4410,10 @@
       });
     }
     if (batteryRateInput) {
-      batteryRateInput.addEventListener("input", (event) => {
+      batteryRateInput.addEventListener("change", (event) => {
         if (state.running) return;
         node.batteryRateMw = clamp(Number(event.target.value) || 1, 1, 40);
+        node.batterySetpointMw = clamp(node.batterySetpointMw || 0, -node.batteryRateMw, node.batteryRateMw);
         state.dirty = true;
         state.solved = false;
         state.simulationNeedsSolve = true;
@@ -4147,6 +4426,7 @@
         draw();
       });
     }
+    if (batteryRateInput) batteryRateInput.addEventListener("change", renderProperties);
     if (batteryEnergyInput) {
       batteryEnergyInput.addEventListener("input", (event) => {
         if (state.running) return;
@@ -4289,7 +4569,7 @@
           <div class="readout-row"><span class="readout-label">Sources</span><span class="readout-value">${formatKw(totals.sourceKw)}</span></div>
           <div class="readout-row"><span class="readout-label">Loads</span><span class="readout-value">${formatKw(totals.loadKw)}</span></div>
           <div class="readout-row"><span class="readout-label">Battery net</span><span class="readout-value">${state.solved ? formatSignedKw(totals.batteryKw) : "--"}</span></div>
-          <div class="readout-row"><span class="readout-label">Battery reserve</span><span class="readout-value">${formatGJ(totals.batteryEnergyGJ)} / ${formatGJ(totals.batteryCapacityGJ)}</span></div>
+          <div class="readout-row"><span class="readout-label">Battery reserve</span><span class="readout-value" id="overviewBatteryReserve">${formatGJ(totals.batteryEnergyGJ)} / ${formatGJ(totals.batteryCapacityGJ)}</span></div>
           <div class="readout-row"><span class="readout-label">Battery max rate</span><span class="readout-value">${formatMwFromKw(totals.batteryRateKw)}</span></div>
           <div class="readout-row"><span class="readout-label">Line losses</span><span class="readout-value">${state.solved ? formatKw(totals.lossKw) : "--"}</span></div>
         </div>
@@ -4314,6 +4594,7 @@
 
   function labelType(type) {
     const map = {
+      flywheel: "Flywheel",
       source: "Source",
       joint: "Substation",
       pole: "Pole",
@@ -4332,19 +4613,81 @@
       batteryEnergyGJ: state.nodes.filter((node) => node.type === "battery").reduce((sum, node) => sum + batteryEnergyGJ(node), 0),
       batteryCapacityGJ: state.nodes.filter((node) => node.type === "battery").reduce((sum, node) => sum + batteryCapacityGJ(node), 0),
       batteryRateKw: state.nodes.filter((node) => node.type === "battery").reduce((sum, node) => sum + batteryRateKw(node), 0),
+      totalInertia: state.nodes.reduce((sum, node) => node.type === "flywheel" ? sum + flywheelModel(node.flywheelMass).inertia : sum, 0),
       lossKw: state.lines.reduce((sum, line) => sum + line.lossKw, 0)
     };
   }
 
+  function updateFrequencyReadout() {
+    let low = Infinity, high = -Infinity;
+    const includeHz = hz => { low = Math.min(low, hz); high = Math.max(high, hz); };
+    if (state.solved && cachedSimulationGraph) cachedSimulationGraph.rotatingIslands.forEach(island => { if (island.active) includeHz(island.hz); });
+    frequencyReadout.textContent = low === Infinity ? "No active flywheel" : high - low < 0.005 ? formatFrequency(low) : `${low.toFixed(2)} - ${formatFrequency(high)}`;
+    frequencyReadout.classList.toggle("warning", low < 59.5 || high > 60.5);
+  }
+
+  function sampleFrequencyHistory() {
+    const t = state.elapsedSeconds;
+    if (frequencyHistory.at(-1)?.t === t) frequencyHistory.pop();
+    while (frequencyHistory.length && frequencyHistory[0].t < t - 60) frequencyHistory.shift();
+    frequencyHistory.push({ t, readings: cachedSimulationGraph.rotatingIslands.filter(i => i.active)
+      .map(i => ({ key: i.traceKey, island: i.index, hz: i.hz, slope: i.slope })) });
+    renderFrequencyHistory();
+  }
+
+  function renderFrequencyHistory() {
+    const series = new Map(), now = frequencyHistory.at(-1)?.t ?? 0;
+    for (const { t, readings } of frequencyHistory) {
+      for (const r of readings) {
+        let s = series.get(r.key);
+        if (!s) {
+          if (!traceStyles.has(r.key)) {
+            const used = new Set(traceStyles.values());
+            traceStyles.set(r.key, traceColors.find(c => !used.has(c)) || `hsl(${hashText32(r.key) % 360} 55% 38%)`);
+          }
+          s = { path: "", color: traceStyles.get(r.key) };
+          series.set(r.key, s);
+        }
+        s.x = (275 - (now - t) * 242 / 60).toFixed(1);
+        s.y = (38 - (r.hz - 60) * 28).toFixed(2);
+        s.path += (s.last === t - 1 ? "L" : "M") + s.x + " " + s.y;
+        s.last = t;
+        s.reading = r;
+      }
+    }
+    const traces = [], labels = [];
+    for (const key of traceStyles.keys()) if (!series.has(key)) traceStyles.delete(key);
+    for (const s of series.values()) {
+      const r = s.reading;
+      traces.push(`<path d="${s.path}" fill="none" stroke="${s.color}" stroke-width="1.6"/><circle cx="${s.x}" cy="${s.y}" r="2" fill="${s.color}"/>`);
+      labels.push(`<span style="border-color:${s.color}">Island ${r.island} &middot; ${s.last === now ? formatFrequency(r.hz) + " &middot; RoCoF " + (r.slope > 0 ? "+" : "") + r.slope.toFixed(3) + " Hz/s" : "past trace"}</span>`);
+    }
+    document.getElementById("frequencyTraces").innerHTML = traces.join("");
+    document.getElementById("frequencyLegend").innerHTML = labels.join("") || "No active flywheel";
+  }
+
+  let networkStatus = "", batteryCapacityText = "", batteryRateText = "";
+  function updateReserveSummary(energy) {
+    const reserve = `${formatGJ(energy)} / ${batteryCapacityText}`;
+    const summary = `${networkStatus}, battery ${reserve}, max rate ${batteryRateText}`;
+    if (networkSummary.textContent !== summary) networkSummary.textContent = summary;
+    const overview = document.getElementById("overviewBatteryReserve");
+    if (overview && overview.textContent !== reserve) overview.textContent = reserve;
+  }
+
   function updateSummaries() {
+    updateFrequencyReadout();
     const liveLines = state.lines.filter((line) => line.online && !line.tripped).length;
     const trippedLines = state.lines.filter((line) => line.tripped).length;
     const totals = computeTotals();
-    networkSummary.textContent = `${state.nodes.length} nodes, ${state.lines.length} lines, ${liveLines} in service`;
-    if (trippedLines) networkSummary.textContent += `, ${trippedLines} tripped`;
+    networkStatus = `${state.nodes.length} nodes, ${state.lines.length} lines, ${liveLines} in service`;
+    if (trippedLines) networkStatus += `, ${trippedLines} tripped`;
+    networkStatus += `, total inertia ${totals.totalInertia.toLocaleString()} kg·m²`;
     if (totals.batteryCapacityGJ > 0) {
-      networkSummary.textContent += `, battery ${formatGJ(totals.batteryEnergyGJ)} / ${formatGJ(totals.batteryCapacityGJ)}, max rate ${formatMwFromKw(totals.batteryRateKw)}`;
-    }
+      batteryCapacityText = formatGJ(totals.batteryCapacityGJ);
+      batteryRateText = formatMwFromKw(totals.batteryRateKw);
+      updateReserveSummary(totals.batteryEnergyGJ);
+    } else networkSummary.textContent = networkStatus;
 
     const message = state.errors[0] || state.warnings[0] || "No warnings";
     warningSummary.textContent = message;
@@ -4377,6 +4720,14 @@
   function normalizeNode(node, fallbackId) {
     const source = node && typeof node === "object" ? node : {};
     source.type = normalizeNodeType(source.type ?? source.node_type ?? source.nodeType, source);
+    if (source.type === "flywheel") {
+      source.rotorActive = source.rotorActive === true;
+      source.flywheelMass = flywheelModel(source.flywheelMass).mass;
+      source.frequencyHz = clamp(finiteOr(source.frequencyHz ?? 60, 60), 59, 61);
+      source.rotorSpinning = source.rotorActive || (source.rotorSpinning == null
+        ? source.frequencyHz !== 60 : source.rotorSpinning === true);
+      source.frequencyRelay = ["high", "low"].includes(source.frequencyRelay) ? source.frequencyRelay : "normal";
+    }
     source.id = normalizeId(source.id ?? source.node_id ?? source.nodeId, fallbackId || `N${state.nextNodeId}`);
     source.name = nonEmptyText(source.name ?? source.label ?? source.title, `${labelType(source.type)} ${source.id}`);
     source.x = finiteOr(source.x ?? source.left ?? source.worldX, 0);
@@ -4425,7 +4776,9 @@
     source.variationDeviationTrend = clamp(firstFinite(source.variationDeviationTrend, source.cycleDeviationTrend) ?? (Math.random() - 0.5) * 0.02, -0.035, 0.035);
 
     if (source.type === "source") {
-      applyFixedSourceBehavior(source);
+      if (requiresVariableProfile(source)) source.powerProfile = "variable";
+      else if (profileValue == null) source.powerProfile = sourceConfig(source).profile || "constant";
+      if (frequency == null) source.variabilityIndex = sourceConfig(source).frequency;
       const power = firstFinite(source.powerKw, source.actualPowerKw, source.outputKw, source.powerOutputKw, source.power_output_kw, source.generationKw, source.generatedKw);
       const minKw = firstFinite(source.minPowerKw, source.minimumPowerKw, source.minKw, source.minimumKw, source.rangeMinKw);
       const maxKw = firstFinite(source.maxPowerKw, source.maximumPowerKw, source.maxKw, source.capacityKw, source.ratingKw, source.powerRatingKw);
@@ -4453,10 +4806,12 @@
       const capacity = firstFinite(source.batteryCapacityGJ, source.capacityGJ, source.capacity_gj);
       source.batteryCapacityGJ = clamp(capacity ?? DEFAULT_BATTERY_CAPACITY_GJ, 10, 1000);
       const energy = firstFinite(source.batteryEnergyGJ, source.energyGJ, source.energy_gj, source.storedEnergyGJ, source.reserveGJ);
-      source.batteryEnergyGJ = roundTo(clamp(energy ?? source.batteryCapacityGJ / 2, 0, source.batteryCapacityGJ), 4);
+      source.batteryEnergyGJ = clamp(energy ?? source.batteryCapacityGJ / 2, 0, source.batteryCapacityGJ);
       const rateMw = firstFinite(source.batteryRateMw, source.rateMw, source.chargeRateMw, source.dischargeRateMw, source.chargeDischargeRateMw, source.charge_rate_mw);
       const rateKw = firstFinite(source.batteryRateKw, source.rateKw, source.chargeRateKw, source.dischargeRateKw, source.charge_rate_kw);
       source.batteryRateMw = clamp(rateMw ?? (rateKw != null ? rateKw / 1000 : DEFAULT_BATTERY_RATE_MW), 1, 40);
+      source.batterySetpointMw = clamp(finiteOr(source.batterySetpointMw ?? source.batteryPowerKw / 1000, 0), -source.batteryRateMw, source.batteryRateMw);
+      source.batteryRotation = Number(source.batteryRotation) === 90 ? 90 : 0;
       source.minPowerKw = 0;
       source.maxPowerKw = 0;
       source.powerKw = 0;
@@ -4494,12 +4849,12 @@
 
   function serializeGrid() {
     return {
-      version: 6,
-      worldSeed: state.worldSeed,
-      worldGeneratorVersion: state.worldGeneratorVersion,
+      version: 8,
+      worldSeed: world.seed,
+      worldGeneratorVersion: world.generatorVersion,
       world: {
-        seed: state.worldSeed,
-        generatorVersion: state.worldGeneratorVersion,
+        seed: world.seed,
+        generatorVersion: world.generatorVersion,
         generatorSignature: world.generatorSignature
       },
       nodes: state.nodes.map((node) => ({ ...node })),
@@ -4580,37 +4935,40 @@
   function importedWorldDescriptor(data) {
     const nested = data.world && typeof data.world === "object" ? data.world : {};
     const seed = firstPresentFinite(
-      data.worldSeed,
       nested.seed,
       nested.worldSeed,
+      data.worldSeed,
       data.terrainSeed,
       data.mapSeed,
       data.seed
     );
     const generatorVersion = firstPresentFinite(
-      data.worldGeneratorVersion,
       nested.generatorVersion,
+      data.worldGeneratorVersion,
       nested.generator,
       data.generatorVersion,
       data.worldVersion
     );
     return {
       seed: seed == null ? deterministicLegacyWorldSeed(data) : Math.floor(seed) >>> 0,
-      generatorVersion: generatorVersion == null ? window.GridboxWorld.GENERATOR_VERSION : Math.floor(generatorVersion),
+      // Seed-only saves originated with generator 1, independently of the app save version.
+      generatorVersion: generatorVersion == null ? 1 : Math.floor(generatorVersion),
       generatorSignature: nested.generatorSignature ?? data.worldGeneratorSignature ?? "",
-      inferredSeed: seed == null,
-      inferredGeneratorVersion: generatorVersion == null
+      inferredSeed: seed == null
     };
   }
 
-  function importGridText(raw) {
+  function importGridText(raw, status = "Grid imported") {
     try {
       stopSimulation("", false);
-      const data = JSON.parse(raw);
+      const data = JSON.parse(raw.trimStart());
       const worldDescriptor = importedWorldDescriptor(data);
       resetWorld(worldDescriptor.seed, worldDescriptor.generatorVersion, worldDescriptor.generatorSignature);
       const usedNodeIds = new Set();
+      const importedMass = mass => Number(data.version) === 7
+        ? ({ 5000: 8000, 6000: 12000, 8000: 16000, 10000: 20000 })[mass] || mass : mass;
       state.nodes = collectionItems(data.nodes).map((node, index) => {
+        if (node?.type === "flywheel") node.flywheelMass = importedMass(node.flywheelMass);
         const normalized = normalizeNode(node, `N${index + 1}`);
         const baseId = normalizeId(normalized.id, `N${index + 1}`);
         let nextId = baseId;
@@ -4628,7 +4986,8 @@
       state.lines = collectionItems(data.lines)
         .map((line, index) => normalizeLine(line, `L${index + 1}`))
         .filter((line) => {
-          const valid = line.from !== line.to && nodeIds.has(line.from) && nodeIds.has(line.to);
+          const valid = line.from !== line.to && nodeIds.has(line.from) && nodeIds.has(line.to)
+            && (line.type !== "transmission" || (getNode(line.from).type !== "flywheel" && getNode(line.to).type !== "flywheel"));
           if (!valid) skippedLines += 1;
           return valid;
         });
@@ -4638,6 +4997,8 @@
       state.elapsedSeconds = Math.max(0, Math.floor(Number(data.elapsedSeconds) || 0));
       resetVariableProfileDrift();
       if (data.placement) {
+        state.placement.flywheelMass = flywheelModel(importedMass(data.placement.flywheelMass)).mass;
+        state.placement.batteryRotation = Number(data.placement.batteryRotation) === 90 ? 90 : 0;
         state.placement.sourceType = SOURCE_TYPES[data.placement.sourceType] && data.placement.sourceType !== "generic" ? data.placement.sourceType : "wind";
         state.placement.sourceRotation = Number(data.placement.sourceRotation) === 90 ? 90 : 0;
         state.placement.loadType = LOAD_TYPES[data.placement.loadType] ? data.placement.loadType : "general";
@@ -4657,16 +5018,15 @@
       state.solved = false;
       state.simulationNeedsSolve = true;
       state.warnings = [];
-      if (skippedLines) state.warnings.push(`Skipped ${skippedLines} line${skippedLines === 1 ? "" : "s"} with missing endpoints.`);
+      if (skippedLines) state.warnings.push(`Skipped ${skippedLines} line${skippedLines === 1 ? "" : "s"} with invalid endpoints.`);
       if (worldDescriptor.inferredSeed) {
         state.warnings.push("This legacy grid had no world seed. GRIDBOX assigned repeatable geography; export it again to lock the world descriptor.");
-      } else if (worldDescriptor.inferredGeneratorVersion) {
-        state.warnings.push("This legacy grid did not record its world generator version. GRIDBOX used the current compatible rules; export it again to lock the world descriptor.");
       }
       state.errors = [];
       resetSolution();
       setMode("select");
-      setCanvasStatus("Grid imported");
+      state.lastTripCount = 0;
+      setCanvasStatus(status);
       updateTimeReadout();
       renderAll();
     } catch (error) {
@@ -4699,67 +5059,7 @@
   }
 
   function loadDemo() {
-    stopSimulation("", false);
-    resetWorld();
-    state.nodes = [];
-    state.lines = [];
-    clearSelection(false);
-    state.connecting = null;
-    state.nodeClipboard = null;
-    state.nextNodeId = 1;
-    state.nextLineId = 1;
-    const n = (type, x, y, name, powerKw, maxPowerKw, display, sourceType) => {
-      const node = nodeDefaults(type, x, y, sourceType, type === "load" ? "general" : undefined);
-      node.name = name;
-      if (display) node.display = display;
-      if (typeof powerKw === "number") node.powerKw = powerKw;
-      if (typeof maxPowerKw === "number") node.maxPowerKw = maxPowerKw;
-      normalizeNode(node);
-      state.nodes.push(node);
-      return node;
-    };
-    const solar = n("source", -340, -120, "North Solar", 8500, 20000, "", "solar");
-    const wind = n("source", -330, 170, "Wind Farm", 4800, 12000, "", "wind");
-    const yardA = n("joint", -90, -40, "Yard A", 0, 0, "YA");
-    const towerA = n("tower", 40, -40, "Tower T1");
-    const yardB = n("joint", 170, -40, "Yard B", 0, 0, "YB");
-    const subC = n("joint", 260, 190, "Substation C", 0, 0, "SC");
-    const cityPole = n("pole", 310, -65, "City Pole");
-    const city = n("load", 420, -90, "City Load", 5600, LOAD_POWER_CAP_KW);
-    const mill = n("load", 460, 170, "Mill Load", 6500, LOAD_POWER_CAP_KW);
-    const battery = n("battery", 60, 210, "Battery Bank");
-
-    const connect = (a, b, type, variant) => {
-      const line = lineDefaults(a.id, b.id, type);
-      line.variant = variant || DEFAULT_LINE_VARIANT;
-      updateLineGeometry(line);
-      state.lines.push(line);
-    };
-    connect(solar, yardA, "distribution", "thin-2");
-    connect(wind, yardA, "distribution", "thin-2");
-    connect(yardA, towerA, "transmission", "thin-1");
-    connect(towerA, yardB, "transmission", "thin-1");
-    connect(yardB, cityPole, "distribution", "thick-1");
-    connect(cityPole, city, "distribution", "thick-1");
-    connect(yardB, subC, "distribution", "thin-2");
-    connect(subC, mill, "distribution", "thick-1");
-    connect(battery, subC, "distribution", "thin-1");
-
-    state.camera = centerCameraForContent();
-    backgroundLayerValid = false;
-    loadFillCache.clear();
-    invalidateSimulationGraph();
-    state.elapsedSeconds = 0;
-    resetVariableProfileDrift();
-    setMode("select");
-    state.dirty = true;
-    state.solved = false;
-    state.simulationNeedsSolve = true;
-    resetSolution();
-    updateTimeReadout();
-    clearSelection(false);
-    setCanvasStatus("Demo loaded");
-    renderAll();
+    importGridText(window.GridboxDemo, "Demo loaded");
   }
 
   function clearNetwork() {
@@ -4785,6 +5085,7 @@
     state.errors = [];
     setMode("select");
     setCanvasStatus("Cleared");
+    resetSolution();
     updateTimeReadout();
     renderAll();
   }
@@ -4811,6 +5112,17 @@
   }
 
   function bindEvents() {
+    const choices = document.getElementById("flywheelChoices");
+    choices.innerHTML = flywheels.map(model =>
+      `<button type="button" class="picker-option flywheel-choice" data-flywheel-mass="${model.mass}"
+        title="${model.inertia.toLocaleString()} kg m²; ${model.rate.toFixed(3)} Hz/s per MW"><strong>${model.mass.toLocaleString()} kg</strong><small>${model.radius} m radius</small></button>`
+    ).join("");
+    choices.addEventListener("click", event => {
+      const button = event.target.closest("[data-flywheel-mass]");
+      if (!button || state.running) return;
+      state.placement.flywheelMass = Number(button.dataset.flywheelMass);
+      setMode("flywheel");
+    });
     document.querySelectorAll(".tool-button[data-mode]:not([data-picker-trigger]):not([data-joint-type])").forEach((button) => {
       button.addEventListener("click", () => setMode(button.dataset.mode));
     });

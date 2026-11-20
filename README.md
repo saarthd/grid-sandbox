@@ -7,10 +7,10 @@ The simulator models connected electrical islands independently. It balances gen
 ## Quick Start
 
 1. Stay in **Edit** mode while building the network.
-2. Select a source, load, battery, pole, tower, or substation from the left panel, then click the map to place it.
+2. Select a source, load, battery, flywheel, pole, tower, or substation from the left panel, then click the map to place it.
 3. Select a 10 kV or 100 kV line type, click the first endpoint, and click the second endpoint.
 4. Click each source and load to set its operating range and initial power.
-5. Add batteries where generation and demand may not match.
+5. Add flywheels (and batteries) where generation and demand may not match.
 6. Check line current ratings and substation transformer ratings.
 7. Press **Run** to start the one-second simulation.
 8. Inspect the overview, lines, and nodes for losses, curtailment, unserved load, battery activity, or trips.
@@ -33,11 +33,11 @@ Run mode advances simulated time in one-second steps. During a run:
 - Constant source output and constant load demand can still be changed within their configured ranges.
 - Variable sources and loads are controlled by the simulator.
 - Lines can be selected, manually tripped, and reclosed, including as a group.
-- Source and load ranges, names, battery settings, substation ratings, and network geometry are locked.
+- Source and load ranges, names, battery capacity and max rate, substation ratings, and network geometry are locked. Battery dispatch stays editable.
 - Batteries charge or discharge every second according to their most recently calculated dispatch.
 - A full power-flow calculation is performed only when the electrical state changes, such as after a setpoint change, variable-profile update, line trip, line reclose, or battery limit event.
 
-If nothing affecting power flow changes, GRIDBOX advances battery energy without unnecessarily solving the entire network again.
+If dispatch is unchanged, GRIDBOX advances battery energy and flywheel frequency using the last calculated power flows. Spinning the symbols does not trigger an electrical solve.
 
 ## Map Controls
 
@@ -50,9 +50,9 @@ If nothing affecting power flow changes, GRIDBOX advances battery energy without
 - **Cancel placement:** Press **Escape** to cancel a pending line or placement tool and return to Select.
 - **Delete:** Select an object and press **Delete** or **Backspace** while no text field is active.
 - **Copy and paste:** Select a node, press **Ctrl+C** and **Ctrl+V** on Windows/Linux, or **Cmd+C** and **Cmd+V** on macOS.
-- **Rotate:** Press **Q** while placing or selecting a rotatable hydroelectric source or load.
+- **Rotate:** Press **Q** in edit mode while placing or selecting a battery, hydroelectric source, or rectangular load.
 
-At 400% zoom, one small grid square represents 10 m by 10 m. Nodes, lines, symbols, and their numbers have map-relative physical sizes, so they shrink together with the terrain as the map is zoomed out. The node selection radius is 5 m.
+At 400% zoom, one small grid square represents 10 m by 10 m. Nodes, lines, symbols, and their numbers shrink together with the terrain as you zoom out. Poles, the smallest flywheel (16,000 kg·m² inertia), and 5 m loads have a centered 3 m by 3 m selection area so you can pick the short lines between them. Other nodes have a 5 m selection radius.
 
 Most labels are deliberately hidden from the map to keep large networks readable. Click an object to see its full information in the inspector. Poles and towers retain small identification numbers, substations show their two-character display name, and sources, loads, and batteries show their live operating value.
 
@@ -113,7 +113,9 @@ A substation warning means the power being stepped between voltage levels exceed
 
 Every source has a user-defined operating range and an initial output. The range minimum may be 0 kW, and the range maximum cannot exceed the limit of the chosen source type. A constant source can be controlled manually within that range. A variable source is controlled by its runtime profile.
 
-| Source type | Runtime profile | Frequency | Maximum range value | Map symbol |
+Wind, solar, and geothermal sources are always **Variable**. Pause with **Stop** to switch any other source between **Constant** and **Variable**, or adjust a variable source's variability index. The index controls setpoint variation; it is separate from the island's electrical frequency in Hz.
+
+| Source type | Default profile | Default variability index | Maximum range value | Map symbol |
 | --- | --- | ---: | ---: | --- |
 | Wind | Variable | 6 | 30,000 kW | Light-yellow triangle |
 | Solar | Variable | 4 | 40,000 kW | Yellow square |
@@ -178,13 +180,42 @@ Battery symbols are green rounded rectangles sized by energy capacity:
 
 The stored reserve is printed on the battery in GJ, rounded to the nearest whole number. The inspector shows more precise reserve and state-of-charge information.
 
-Within each connected island, batteries absorb excess generation or cover a generation deficit. Dispatch is shared among available batteries according to their usable rate and remaining charge or storage space. Energy changes each second according to power multiplied by time:
+Set **Dispatch (MW)** in the inspector. A new battery starts idle. Positive values discharge, negative values charge, and zero holds the reserve. Release the slider or press **Enter** in the numeric field to apply a command, even during a run. Shift-select batteries with matching capacity and max rate to apply the same command **per battery**: +2 MW on three batteries requests 6 MW total. Press **Q** in edit mode to turn a selected battery 90 degrees.
 
-`reserve change in GJ = battery power in kW x elapsed seconds / 1,000,000`
+The dispatch slider has 100 intervals from maximum charge to maximum discharge, with zero at the center. For example, a 10 MW maximum gives 200 kW per step. Slider commands land on whole kW; use the number box for 1 kW precision.
+
+Commanded and actual power can differ. An isolated battery exchanges nothing; empty batteries cannot discharge and full ones cannot charge. Network protection can also back off a command. Energy follows actual power:
+
+`reserve change in GJ = -battery power in kW x elapsed seconds / 1,000,000`
 
 Positive battery power means the battery is discharging into the grid. Negative battery power means it is charging from the grid. A negative line net at a charging battery is therefore expected: power is entering the node rather than leaving it.
 
-If batteries reach their charge-rate or capacity limits, excess generation is curtailed. If batteries reach their discharge-rate or empty-reserve limits, the remaining shortage becomes unserved load.
+When batteries cannot cover the full imbalance, the next response depends on whether their electrical island has a flywheel.
+
+## Flywheels and Frequency
+
+Choose **Flywheel**, select a rotor, place it at a grid intersection, and connect it with a **10 kV** line. A new wheel starts at 60 Hz. Connected wheels share one frequency: a generation surplus speeds them up, and a deficit slows them down. Larger wheels give you more time to correct an imbalance.
+
+| Mass | Rotor radius | Inertia (kg m²) | Frequency change per second at 1 MW imbalance | Symbol diameter |
+|---:|---:|---:|---:|---:|
+| 8,000 kg | 2 m | 16,000 | 0.421 Hz | 5 m |
+| 12,000 kg | 3 m | 54,000 | 0.125 Hz | 10 m |
+| 16,000 kg | 4 m | 128,000 | 0.053 Hz | 15 m |
+| 20,000 kg | 5 m | 250,000 | 0.027 Hz | 20 m |
+
+The rates are for one wheel acting alone. Two identical wheels sharing the same imbalance drift half as fast. For example, one 12,000 kg wheel serving a 2 MW deficit falls about 0.25 Hz each second, plus the effect of line losses. Commanding roughly +2 MW from a battery arrests the fall; a little more will bring frequency back up. Reduce the command again near 60 Hz.
+
+A newly placed wheel stays still until it joins an energized island. A load alone cannot spin it up: connect a producing source or command a charged battery to discharge first. After a wheel spins up, opening its last line isolates it electrically, but does not stop the rotor. Its inspector shows **coasting**: power exchange is zero, and frequency and rpm stay exactly where they were at disconnection. GRIDBOX does not model bearing or air losses. Exporting and importing preserves this state.
+
+If a load remains connected after generation disconnects, the spinning wheel can supply it and slow down; this is different from coasting with no load. When islands join, their shared frequency is the inertia-weighted average: `(I₁ × f₁ + I₂ × f₂) / (I₁ + I₂)`, where each island's inertia is the sum of its spinning rotors' moments of inertia. A coasting wheel counts when it reconnects; a never-started wheel supplies no frequency reference. Coasting on its own does not contribute a reading to the active-grid chart.
+
+The header shows frequency, or the frequency range when islands differ. Click a wheel for its own frequency, power exchange and mechanical speed. Its eight-pole rotor turns at 900 rpm at 60 Hz (15 rpm per Hz). The cross on the map deliberately exaggerates changes: it turns at 30 rpm at 59 Hz, 60 rpm at 60 Hz and 120 rpm at 61 Hz. Its outline blinks red outside 59.5–60.5 Hz.
+
+At **61 Hz**, protection curtails sources proportionally to keep a surplus from accelerating the wheels further. At **59 Hz**, it sheds demand proportionally to arrest a decline. Affected sources and loads blink orange. High-frequency protection resets on recovery to 60.8 Hz; low-frequency protection resets at 59.2 Hz. You can adjust setpoints or trip and reclose lines throughout. Splitting an island lets the two sides drift independently; reconnecting them synchronizes their wheels.
+
+**Reading the chart.** Each trace covers up to 60 simulated seconds for an active island with flywheels. The legend shows frequency in Hz and **RoCoF** (rate of change of frequency) in Hz/s. A negative RoCoF means the island is slowing. A flat trace at 59 or 61 Hz can mean protection is intervening, not that your requested dispatch is balanced. Pausing freezes the chart; starting a new world, importing, or editing in a way that resets the clock clears it.
+
+**Responding to trouble.** For falling frequency, reduce charging, discharge storage, increase generation, or trip a nonessential load feeder. For rising frequency, reduce discharge, charge storage, or lower generation. At a protection limit, batteries pushing in the wrong direction are backed off first; any remaining adjustment is shared among sources or loads. Inspect the line current before reclosing a tripped feeder. A wheel's full exchange flows through its connections, in either direction: 6 MW on a single 10 kV feeder is about 600 A before losses and will trip a 500 A line. Reclosing without reducing the flow can trip it again on the next tick.
 
 ## Power-Flow Mechanics
 
@@ -196,10 +227,10 @@ GRIDBOX divides the active network into connected islands using only lines that 
 
 For each island, the simulator compares requested source generation with requested load and estimated network losses:
 
-1. Available batteries charge when generation is excessive.
-2. Available batteries discharge when generation is insufficient.
-3. If excess remains after charging limits are reached, all applicable sources can be curtailed proportionally, including constant sources.
-4. If a deficit remains after discharge limits are reached, loads receive a proportional share of available power.
+1. Apply each battery's signed manual command within its rate, reserve, and remaining capacity.
+2. Combine battery power with generation, demand, and estimated line losses.
+3. Flywheels absorb any remaining surplus or supply the remaining deficit until frequency protection intervenes.
+4. In an island without flywheels, there is no modeled inertial buffer: excess generation is curtailed or unmet demand is shed immediately. Constant and variable sources share curtailment proportionally.
 5. The voltage and line-current solution is recalculated, including resistive losses.
 
 The effective value shown as generated power may therefore be lower than a source's requested setpoint. Similarly, served load may be lower than requested demand during a shortage.
@@ -269,9 +300,9 @@ When a zone-dependent source or load tool is active, the placement overlay helps
 
 ## Saving And Loading Grids
 
-Use **Export** to download the current electrical grid as a JSON file. The export contains the network geometry, component attributes, operating ranges, battery state, and other information needed to restore the design.
+Use **Export** to download the current electrical grid as a JSON file. The export contains the network geometry, component attributes, operating ranges, battery state, and other information needed to restore the design. It also stores a compact world descriptor containing the procedural seed, generator version, and compatibility signature. This descriptor is only a few dozen bytes; the generated terrain and zone cells are not stored in the file.
 
-Use **Import** to load a previously exported grid. Legacy JSON exports from older GRIDBOX versions are normalized during import so older designs remain usable. Export a fresh copy before making major experimental changes to a valuable grid.
+Use **Import** to load a previously exported grid. The world descriptor recreates the same oceans, rivers, residential areas, commercial areas, industrial areas, and renewable-resource zones. Legacy JSON exports from older GRIDBOX versions are normalized during import. If a legacy file has no world seed, GRIDBOX derives a repeatable seed from its grid data and asks for the grid to be exported again so the descriptor is permanently recorded. Export a fresh copy before making major experimental changes to a valuable grid.
 
 ## Building A Reliable Grid
 

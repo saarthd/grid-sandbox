@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>GRIDBOX Electrical Simulator</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=11">
   </head>
   <body>
     <div class="app-shell">
@@ -51,6 +51,7 @@
               <path d="M14 11v6"></path>
             </svg>
           </button>
+          <output class="time-chip frequency-chip" id="frequencyReadout" aria-label="Grid frequency" title="Frequency on islands with flywheels">No flywheel</output>
           <div class="time-chip" id="timeReadout">t = 0 s</div>
           <button class="primary-button" id="runButton" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -89,6 +90,9 @@
           <button class="tool-button" type="button" data-mode="battery" title="Add battery node" aria-label="Add battery node">
             <span class="tool-glyph battery-glyph" aria-hidden="true"></span>
           </button>
+          <button class="tool-button" type="button" data-mode="flywheel" data-picker-trigger="flywheel" title="Choose a flywheel" aria-label="Choose a flywheel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="white"></circle><path d="M5 12h14M12 5v14"></path></svg>
+          </button>
           <div class="tool-separator"></div>
           <button class="tool-button voltage-tool distribution-tool" type="button" data-mode="line-distribution" data-picker-trigger="distribution" title="Choose a 10 kV line" aria-label="Choose a 10 kV line">
             <span>10 kV</span>
@@ -117,6 +121,11 @@
             <button class="picker-option" type="button" data-source-type="nuclear" title="Nuclear Source" aria-label="Nuclear Source"><span class="source-preview nuclear-preview"></span></button>
             <button class="picker-option hydro-option" type="button" data-source-type="hydro" title="Hydroelectric Source" aria-label="Hydroelectric Source"><span class="source-preview hydro-preview"></span></button>
           </div>
+        </div>
+
+        <div class="placement-popover" data-picker-panel="flywheel" hidden>
+          <div class="picker-heading">Flywheels</div>
+          <div class="line-picker-grid" id="flywheelChoices"></div>
         </div>
 
         <div class="placement-popover load-picker" id="loadPicker" data-picker-panel="load" hidden>
@@ -151,6 +160,9 @@
 
         <section class="canvas-panel">
           <canvas id="gridCanvas" aria-label="Electrical grid canvas"></canvas>
+          <canvas class="map-layer" id="rotorLayer" aria-hidden="true"></canvas>
+          <canvas class="map-layer" id="alarmLayer" aria-hidden="true" hidden></canvas>
+          <canvas class="map-layer" id="transmissionLayer" aria-hidden="true"></canvas>
           <div class="canvas-hud">
             <button id="zoomOutButton" type="button" aria-label="Zoom out" title="Zoom out">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"></path></svg>
@@ -168,18 +180,28 @@
             <h2>Network</h2>
             <span id="solveBadge">Unsolved</span>
           </div>
+          <section class="frequency-panel" aria-label="Frequency history">
+            <div class="field-row"><h3>Frequency</h3><small>Last 60 s</small></div>
+            <svg viewBox="0 0 280 94" role="img" aria-label="Island frequencies over the last 60 simulated seconds">
+              <g class="frequency-guides"><path d="M33 10H275 M33 38H275 M33 66H275"/></g>
+              <g class="frequency-labels"><text x="0" y="13">61 Hz</text><text x="0" y="41">60 Hz</text><text x="0" y="69">59 Hz</text><text x="33" y="86">-60 s</text><text x="275" y="86" text-anchor="end">Now</text></g>
+              <g id="frequencyTraces"></g>
+            </svg>
+            <div id="frequencyLegend">No active flywheel</div>
+          </section>
           <div id="properties"></div>
         </aside>
       </main>
 
       <footer class="statusbar">
-        <div id="networkSummary">0 nodes, 0 lines</div>
+        <div id="networkSummary">0 nodes, 0 lines, total inertia 0 kg·m²</div>
         <div id="warningSummary">No warnings</div>
       </footer>
     </div>
 
-    <script src="world.js" defer></script>
-    <script src="grid-engine.js?v=8" defer></script>
-    <script src="app.js?v=9" defer></script>
+    <script src="world.js?v=1-2935ea24" defer></script>
+    <script src="grid-engine.js?v=11" defer></script>
+    <script src="demo-grid.js?v=1" defer></script>
+    <script src="app.js?v=16" defer></script>
   </body>
 </html>
