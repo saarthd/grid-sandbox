@@ -10,6 +10,10 @@
   const MAX_MASK_TILES = 300;
   const MAX_ANCHORED_FEATURES = 2400;
   const TWO_PI = Math.PI * 2;
+  const GENERATOR_VERSION = 1;
+  const GENERATOR_SIGNATURES = Object.freeze({
+    1: "2935ea24"
+  });
 
   const featureSpecs = {
     residential: { spacing: 2400, reach: 1500 },
@@ -51,8 +55,22 @@
     return Number.isFinite(number) ? Math.floor(number) >>> 0 : randomSeed();
   }
 
-  function create(seedValue) {
+  function normalizeGeneratorVersion(value) {
+    const requested = value && typeof value === "object"
+      ? value.generatorVersion ?? value.version
+      : value;
+    if (requested == null || requested === "") return GENERATOR_VERSION;
+    const version = Math.floor(Number(requested));
+    if (!Number.isFinite(version) || !GENERATOR_SIGNATURES[version]) {
+      throw new Error(`Unsupported world generator version: ${String(requested)}`);
+    }
+    return version;
+  }
+
+  function create(seedValue, generatorVersionValue) {
     const seed = normalizeSeed(seedValue);
+    const generatorVersion = normalizeGeneratorVersion(generatorVersionValue);
+    const generatorSignature = GENERATOR_SIGNATURES[generatorVersion];
     const chunkCache = new Map();
     const waterTileCache = new Map();
     const maskTileCache = new Map();
@@ -1003,6 +1021,8 @@
 
     return {
       seed,
+      generatorVersion,
+      generatorSignature,
       draw,
       isWater,
       touches,
@@ -1021,6 +1041,8 @@
 
   window.GridboxWorld = {
     CHUNK_SIZE_M,
+    GENERATOR_VERSION,
+    GENERATOR_SIGNATURE: GENERATOR_SIGNATURES[GENERATOR_VERSION],
     create,
     randomSeed
   };
