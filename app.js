@@ -14,6 +14,9 @@
   const rotorAngles = new WeakMap();
   let visibleRotors = [];
   let visibleLimitedNodes = [];
+  let visibleSensors = [];
+  const sensorRules = window.GridboxSensors;
+  const sensorControl = new sensorRules.Controller();
   let rotorFrame = null;
   let rotorTime = 0;
   let networkLayerValid = false;
@@ -223,6 +226,7 @@
   const TWO_PI = Math.PI * 2;
 
   const NODE_TYPE_ALIASES = {
+    sensor: "sensor",
     source: "source",
     generator: "source",
     plant: "source",
@@ -387,6 +391,7 @@
       pole: "Pole",
       tower: "Tower",
       flywheel: "Flywheel",
+      sensor: "Sensor",
       load: `${loadConfig.label} Load`,
       battery: "Battery"
     };
@@ -395,6 +400,7 @@
       id: `N${id}`,
       type,
       ...(type === "flywheel" ? { flywheelMass: state.placement.flywheelMass, frequencyHz: 60, frequencyRelay: "normal", rotorSpinning: false } : {}),
+      ...(type === "sensor" ? { sensor: sensorRules.normalize() } : {}),
       name: `${labels[type]} ${id}`,
       display: type === "joint" ? `S${id % 10}` : "",
       x,
@@ -497,6 +503,7 @@
     state.errors = [];
     state.lastTripCount = 0;
     loadFillCache.clear();
+    reconcilePausedSensors();
     invalidateSimulationGraph();
     resetSolution();
     setCanvasStatus(message || "Edited");
@@ -514,6 +521,7 @@
 
   function updateRunButton() {
     runButton.classList.toggle("running", state.running);
+    alarmCtx.canvas.classList.toggle("running", state.running);
     runButton.innerHTML = state.running
       ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7z"></path><path d="M13 5h4v14h-4z"></path></svg>Stop`
       : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>Run`;
@@ -578,12 +586,14 @@
   let incidentLinesByNode = new Map();
   let simulationGraphRevision = 0;
   let cachedSimulationGraph = null;
+  let sensorNodes = [];
 
   function currentNodeIndex() {
     if (indexedNodes !== state.nodes || indexedNodeCount !== state.nodes.length) {
       indexedNodes = state.nodes;
       indexedNodeCount = state.nodes.length;
       nodeById = new Map(state.nodes.map((node) => [node.id, node]));
+      sensorNodes = state.nodes.filter(node => node.type === "sensor");
       indexedLines = null;
     }
     return nodeById;
@@ -1101,6 +1111,7 @@
       joint: `Add ${jointTypeLabel(state.placement.jointType)}`,
       load: `Add ${LOAD_TYPES[state.placement.loadType].label} Load`,
       battery: "Add battery",
+      sensor: "Place sensor",
       flywheel: `Add ${state.placement.flywheelMass.toLocaleString()} kg flywheel`,
       "line-distribution": `Draw 10 kV ${lineVariant({ variant: state.placement.distributionVariant }).label}`,
       "line-transmission": `Draw 100 kV ${lineVariant({ variant: state.placement.transmissionVariant }).label}`
@@ -1203,7 +1214,7 @@
   }
 
   function isDistributionEndpoint(node) {
-    return node && node.type !== "tower";
+    return node && node.type !== "tower" && node.type !== "sensor";
   }
 
   function validateLine(fromId, toId, type) {
@@ -1245,6 +1256,39 @@
       }
     }
     return "";
+  }
+
+  function sensorPlacement(point, target) {
+    if (state.running) return;
+    if (!state.connecting?.point) {
+      state.connecting = { type: "sensor", point: { x: snap(point.x), y: snap(point.y) } };
+      setCanvasStatus("Select a source, load, battery, tower or pole for this sensor");
+      draw({ reuseNetwork: true });
+      return;
+    }
+    if (!sensorRules.eligible(target)) {
+      setCanvasStatus("Choose a controllable constant source or load, battery, tower or pole");
+      return;
+    }
+    currentNodeIndex();
+    if (sensorNodes.filter(n => n.sensor.targetId === target.id).length >= sensorRules.slots(target)) {
+      setCanvasStatus("Target has no available sensor connections");
+      return;
+    }
+    const pending = state.connecting;
+    const node = nodeDefaults("sensor", pending.point.x, pending.point.y);
+    if (pending.copy) {
+      node.name = uniqueNodeName(pending.copy.name + " copy");
+      node.sensor = sensorRules.normalize(pending.copy.sensor);
+      node.sensor.mode = "idle";
+      node.sensor.law = "normal";
+    }
+    node.sensor.targetId = target.id;
+    node.sensor.lineId = sensorRules.switching(target) ? incidentLines(target.id)[0]?.id || "" : "";
+    state.connecting = null;
+    state.nodes.push(node);
+    selectItem("node", node.id);
+    setDirty(`${node.name} connected to ${target.name}`);
   }
 
   function addNode(type, point) {
@@ -1300,6 +1344,8 @@
       return;
     }
     const nodeIds = new Set(nodes.map((node) => node.id));
+    currentNodeIndex();
+    for (const s of sensorNodes) if (nodeIds.has(s.sensor.targetId)) nodeIds.add(s.id);
     const lineIds = new Set(lines.map((line) => line.id));
     state.nodes = state.nodes.filter((node) => !nodeIds.has(node.id));
     state.lines = state.lines.filter((line) => !lineIds.has(line.id) && !nodeIds.has(line.from) && !nodeIds.has(line.to));
@@ -1317,6 +1363,7 @@
     state.nodeClipboard = {
       type: node.type,
       flywheelMass: node.flywheelMass,
+      sensor: node.type === "sensor" ? structuredClone(node.sensor) : undefined,
       name: node.name,
       display: node.display || "",
       x: node.x,
@@ -1352,6 +1399,12 @@
     }
     const copied = state.nodeClipboard;
     const anchor = selectedNode() || copied;
+    if (copied.type === "sensor") {
+      setMode("sensor");
+      sensorPlacement({ x: anchor.x + 30, y: anchor.y + 30 });
+      state.connecting.copy = copied;
+      return;
+    }
     const node = nodeDefaults(copied.type, snap(anchor.x + 30), snap(anchor.y + 30), copied.sourceType, copied.loadType);
     if (node.type === "flywheel") node.flywheelMass = flywheelModel(copied.flywheelMass).mass;
     node.name = uniqueNodeName(`${copied.name} copy`);
@@ -1439,6 +1492,10 @@
       const node = state.nodes[i];
       const dx = Math.abs(world.x - node.x), dy = Math.abs(world.y - node.y);
       if (dx > CLICK_RADIUS_M || dy > CLICK_RADIUS_M) continue;
+      if (node.type === "sensor") {
+        if (dx * dx + dy * dy <= 9) return node;
+        continue;
+      }
       let small = node.type === "pole" || (node.type === "flywheel" && flywheelModel(node.flywheelMass).diameter <= 5);
       if (node.type === "load") {
         const size = loadVisualDimensions(node);
@@ -1704,6 +1761,7 @@
   function performTouchTap(gesture) {
     const node = gesture.nodeId ? getNode(gesture.nodeId) : null;
     const line = gesture.lineId ? getLine(gesture.lineId) : null;
+    if (state.mode === "sensor") return sensorPlacement(gesture.startWorld, node);
     if (state.mode.startsWith("line-")) {
       if (node) handleLineClick(node);
       return;
@@ -1803,6 +1861,8 @@
       return;
     }
 
+    if (state.mode === "sensor") return sensorPlacement(world, node);
+
     if (state.mode.startsWith("line-")) {
       if (node) {
         handleLineClick(node);
@@ -1869,6 +1929,14 @@
   function onPointerMove(event) {
     if (event.pointerType === "touch") {
       onTouchPointerMove(event);
+      return;
+    }
+    if (!state.pointer.down && state.connecting?.type === "sensor") {
+      state.pointer.lastScreen = pointerPosition(event);
+      if (cameraDrawFrame == null) cameraDrawFrame = window.requestAnimationFrame(() => {
+        cameraDrawFrame = null;
+        draw({ reuseNetwork: true });
+      });
       return;
     }
     if (!state.pointer.down) return;
@@ -2002,9 +2070,21 @@
     try {
       ctx.save();
       ctx.clearRect(0, 0, rect.width, rect.height);
+      currentNodeIndex();
+      ctx.strokeStyle = "#505861";
+      ctx.lineWidth = 0.24 * state.camera.scale;
+      ctx.beginPath();
+      for (const sensor of sensorNodes) {
+        const target = getNode(sensor.sensor.targetId);
+        if (!target) continue;
+        const a = worldToScreen(sensor.x, sensor.y), b = worldToScreen(target.x, target.y);
+        if (segmentNearViewport(a, b, rect)) { ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); }
+      }
+      ctx.stroke();
       drawLines("distribution", false, renderState);
       visibleRotors = [];
       visibleLimitedNodes = [];
+      visibleSensors = [];
       drawNodes(renderState);
       ctx.restore();
       ctx = transmissionCtx;
@@ -2069,6 +2149,14 @@
         ctx.stroke();
       }
       let active = visibleLimitedNodes.length > 0;
+      for (const { node, p } of visibleSensors) {
+        if (node.sensor.mode !== "auto") continue;
+        ctx.fillStyle = { normal: "#169552", excess: "#287bd0", deficit: "#e7b413" }[node.sensor.law];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.05 * scale, 0, TWO_PI);
+        ctx.fill();
+        active = true;
+      }
       for (const rotor of visibleRotors) {
         rotor.alarm = rotorAlarm(rotor.node);
         if (!rotor.alarm) continue;
@@ -2444,13 +2532,15 @@
 
   function drawConnectionPreview() {
     if (!state.connecting || !state.pointer.lastScreen) return;
-    const from = getNode(state.connecting.from);
+    const previewSensor = state.connecting.type === "sensor";
+    const from = previewSensor ? state.connecting.point : getNode(state.connecting.from);
     if (!from) return;
     const a = worldToScreen(from.x, from.y);
     const b = state.pointer.lastScreen;
     ctx.save();
+    if (previewSensor) drawNodeShape({ type: "sensor", x: from.x, y: from.y }, a, false);
     ctx.strokeStyle = "#111820";
-    ctx.lineWidth = lineVariant({ variant: DEFAULT_LINE_VARIANT }).thicknessM * state.camera.scale;
+    ctx.lineWidth = (previewSensor ? 0.24 : lineVariant({ variant: DEFAULT_LINE_VARIANT }).thicknessM) * state.camera.scale;
     ctx.setLineDash([6 * state.camera.scale, 4 * state.camera.scale]);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
@@ -2463,6 +2553,7 @@
     state.nodes.forEach((node) => {
       const p = worldToScreen(node.x, node.y);
       if (!pointNearViewport(p, renderState.rect)) return;
+      if (node.type === "sensor") visibleSensors.push({ node, p });
       if (node.type === "flywheel") visibleRotors.push({ node, p, radius: nodeVisualRadiusM(node) * state.camera.scale });
       if (state.running && (node.curtailedKw > 0 || node.unservedKw > 0)) visibleLimitedNodes.push({ node, p });
       const selected = renderState.selectedKeys.has(`node:${node.id}`);
@@ -2496,7 +2587,12 @@
     ctx.strokeStyle = node.type === "tower" ? colors.towerLine : "#ffffff";
     ctx.lineWidth = (node.type === "source" ? 0.9 : 0.7) * scale;
 
-    if (node.type === "flywheel") {
+    if (node.type === "sensor") {
+      roundedRect(p.x - 2 * scale, p.y - 2 * scale, 4 * scale, 4 * scale, 0.8 * scale);
+      ctx.fillStyle = "#fff";
+      ctx.lineWidth = 0.45 * scale;
+      ctx.strokeStyle = "#171a1c";
+    } else if (node.type === "flywheel") {
       const radius = nodeVisualRadiusM(node) * scale;
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, TWO_PI);
@@ -2562,6 +2658,7 @@
   }
 
   function nodeVisualRadiusM(node) {
+    if (node.type === "sensor") return 2;
     if (node.type === "flywheel") return flywheelModel(node.flywheelMass).diameter / 2;
     if (node.type === "source") {
       const size = sourceVisualDimensions(node);
@@ -2602,7 +2699,7 @@
     if (node.type === "source" || node.type === "load") {
       if (node.type === "source" && !["coal", "gas"].includes(node.sourceType)) ctx.fillStyle = "#4a3c00";
       ctx.font = `800 ${Math.max(1, 3.1 * scale)}px Inter, Segoe UI, sans-serif`;
-      ctx.fillText(String(Math.round(node.powerKw || 0)), p.x, p.y);
+      ctx.fillText(String(Math.round(commandedPower(node))), p.x, p.y);
     } else if (node.type === "joint") {
       ctx.font = `850 ${Math.max(1, 4.1 * scale)}px Inter, Segoe UI, sans-serif`;
       ctx.fillText((node.display || "").slice(0, 2).toUpperCase(), p.x, p.y - 1.2 * scale);
@@ -2798,6 +2895,15 @@
         solve(remaining > 1e-9 ? remaining : dispatchSeconds, changedIslands);
       }
     }
+    // Sample all controls together, once, after frequency integration. Switching cannot recursively fire another sensor.
+    const control = sensorControl.sample(sensorNodes, getNode, getLine, sensorFrequency);
+    if (control.topology) {
+      invalidateSimulationGraph();
+      solve();
+    } else if (control.powerNodes?.length) {
+      const islands = new Set(control.powerNodes.map(id => cachedSimulationGraph.components[getNode(id).island - 1]));
+      solve(dispatchSeconds, [...islands]);
+    }
     state.elapsedSeconds += advanceSeconds;
     sampleFrequencyHistory();
     if (solvedThisTick) state.lastTripCount = tripCount;
@@ -2818,10 +2924,12 @@
       }
     }
     if (options.renderProperties !== false && !isLivePowerControlFocused()) {
-      if (solvedThisTick) renderProperties();
+      if (solvedThisTick || control.visual) renderProperties();
       else refreshFastRuntimeProperties();
     }
-    if (solvedThisTick || batteryDisplayChanged || !networkLayerValid) draw();
+    const inspected = selectedNode();
+    if (inspected?.type === "sensor") refreshSensorReadout(inspected);
+    if (solvedThisTick || control.visual || batteryDisplayChanged || !networkLayerValid) draw();
     else if (visibleRotors.some(rotor => rotor.alarm !== rotorAlarm(rotor.node))) {
       paintAlarmLayer(canvas.getBoundingClientRect());
     }
@@ -2847,7 +2955,7 @@
         state.errors = component.errors = [];
         computePowerFlows(component, dispatchSeconds);
         if (component.wheels.length) {
-          component.active = component.lines.length > 0 && (component.sources.some(n => n.powerKw > 0)
+          component.active = component.lines.length > 0 && (component.sources.some(n => commandedPower(n) > 0)
             || component.batteries.some(n => Math.abs(n.batteryPowerKw) > 0)
             || component.wheels.some(n => Math.abs(n.effectivePowerKw) > 0));
         }
@@ -2879,6 +2987,7 @@
       for (const line of overloads) {
         line.tripped = true;
         line.online = false;
+        sensorControl.externalSwitch(line);
       }
       trips += overloads.length;
       invalidateSimulationGraph();
@@ -2906,6 +3015,7 @@
 
   function isLivePowerControlFocused() {
     if (!state.running || !document.activeElement) return false;
+    if (document.activeElement.closest?.("#sensorSettings")) return true;
     return ["powerSlider", "powerNumber", "bulkPowerNumber", "batteryCommand", "batteryCommandSlider"].includes(document.activeElement.id);
   }
 
@@ -3078,7 +3188,7 @@
     const components = [];
     const componentByNodeId = new Map();
     state.nodes.forEach((start) => {
-      if (visited.has(start.id)) return;
+      if (start.type === "sensor" || visited.has(start.id)) return;
       const queue = [start.id];
       let queueIndex = 0;
       const nodeIds = [];
@@ -3197,22 +3307,62 @@
     return Math.max(0, Math.min(batteryRateKw(node), byCapacity));
   }
 
+  function commandedPower(node) {
+    const delta = sensorControl.offsets.get(node.id);
+    if (node.type === "battery") {
+      const base = (node.batterySetpointMw || 0) * 1000;
+      return delta ? clamp(base + delta, -batteryRateKw(node), batteryRateKw(node)) : base;
+    }
+    return delta && sensorRules.eligible(node) ? clampNodePower(node, node.powerKw + delta) : node.powerKw;
+  }
+
+  function sensorFrequency(target) {
+    const island = cachedSimulationGraph?.components[target.island - 1];
+    return island?.active && island.wheels.length ? island.hz : null;
+  }
+
+  function reconcilePausedSensors() {
+    currentNodeIndex();
+    const control = sensorControl.sample(sensorNodes, getNode, getLine, () => null);
+    if (control.topology) invalidateSimulationGraph();
+    if (control.topology || control.powerNodes?.length) {
+      state.simulationNeedsSolve = true;
+      state.solved = false;
+    }
+  }
+
+  function hasSensorReference(target) {
+    if (!sensorRules.eligible(target)) return false;
+    if (state.solved && cachedSimulationGraph) return !!cachedSimulationGraph.components[target.island - 1]?.wheels.length;
+    const queue = [target], seen = new Set([target.id]);
+    for (let i = 0; i < queue.length; i++) {
+      if (queue[i].type === "flywheel") return true;
+      for (const line of incidentLines(queue[i].id)) {
+        if (!line.online || line.tripped) continue;
+        const id = line.from === queue[i].id ? line.to : line.from;
+        if (!seen.has(id)) { seen.add(id); queue.push(getNode(id)); }
+      }
+    }
+    return false;
+  }
+
   function prepareComponentPower(component, targetLossKw, dispatchSeconds, report) {
     const { sources, loads, batteries, wheels } = component;
-    const sourceKw = sources.reduce((sum, node) => sum + node.powerKw, 0);
-    const loadKw = loads.reduce((sum, node) => sum + node.powerKw, 0);
+    let sourceKw = 0, loadKw = 0;
 
     sources.forEach((node) => {
-      node.effectivePowerKw = node.powerKw;
+      node.effectivePowerKw = commandedPower(node);
+      sourceKw += node.effectivePowerKw;
       node.curtailedKw = 0;
     });
     loads.forEach((node) => {
-      node.effectivePowerKw = -node.powerKw;
+      node.effectivePowerKw = -commandedPower(node);
+      loadKw -= node.effectivePowerKw;
       node.unservedKw = 0;
     });
     const net = sourceKw - loadKw;
     for (const node of batteries) {
-      const requested = (node.batterySetpointMw || 0) * 1000;
+      const requested = commandedPower(node);
       node.batteryPowerKw = component.lines.length ? clamp(requested, -batteryAvailableChargeKw(node, dispatchSeconds),
         batteryAvailableDischargeKw(node, dispatchSeconds)) : 0;
       node.effectivePowerKw = node.batteryPowerKw;
@@ -3252,17 +3402,17 @@
       const curtailed = Math.min(mismatch, sourceKw);
       // Runtime profile affects the setpoint, not dispatch eligibility: all sources share curtailment.
       sources.forEach((node) => {
-        const share = sourceKw > 0 ? curtailed * (node.powerKw / sourceKw) : 0;
+        const share = sourceKw > 0 ? curtailed * (node.effectivePowerKw / sourceKw) : 0;
         node.curtailedKw = share;
-        node.effectivePowerKw = Math.max(0, node.powerKw - share);
+        node.effectivePowerKw = Math.max(0, node.effectivePowerKw - share);
       });
       if (report) addWarningOnce(`Island ${component.index} curtailed ${formatKw(curtailed)} after losses.`);
     } else {
       const deficit = Math.min(-mismatch, loadKw);
       loads.forEach((node) => {
-        const share = loadKw > 0 ? deficit * (node.powerKw / loadKw) : 0;
+        const share = loadKw > 0 ? deficit * (-node.effectivePowerKw / loadKw) : 0;
         node.unservedKw = share;
-        node.effectivePowerKw = -Math.max(0, node.powerKw - share);
+        node.effectivePowerKw = -Math.max(0, -node.effectivePowerKw - share);
       });
       if (report) addWarningOnce(`Island ${component.index} has ${formatKw(deficit)} unserved load after losses.`);
     }
@@ -3504,6 +3654,7 @@
     targets.forEach((line) => {
       line.online = false;
       line.tripped = true;
+      sensorControl.externalSwitch(line);
       resetLinePower(line);
     });
     state.dirty = true;
@@ -3525,6 +3676,7 @@
     targets.forEach((line) => {
       line.tripped = false;
       line.online = true;
+      sensorControl.externalSwitch(line);
     });
     state.dirty = true;
     state.solved = false;
@@ -3612,6 +3764,7 @@
       return;
     }
     state.dirty = true;
+    reconcilePausedSensors();
     state.solved = false;
     state.simulationNeedsSolve = true;
     state.elapsedSeconds = 0;
@@ -4094,7 +4247,70 @@
     });
   }
 
+  function refreshSensorReadout(node) {
+    const cfg = node.sensor, target = getNode(cfg.targetId);
+    const output = document.getElementById("sensorSignal");
+    if (!output) return;
+    const hz = state.solved && target ? sensorFrequency(target) : null;
+    const reference = hasSensorReference(target);
+    output.textContent = cfg.mode === "idle" ? (!sensorRules.eligible(target) ? "Idle · Variable target" : reference ? "Idle" : "Idle · No flywheel") :
+      `${cfg.law[0].toUpperCase() + cfg.law.slice(1)} · ${Number.isFinite(hz) ? formatFrequency(hz) : "No signal"}`;
+    const auto = document.getElementById("sensorAuto");
+    if (auto) auto.disabled = !reference;
+  }
+
+  function renderSensorProperties(node) {
+    const cfg = node.sensor, target = getNode(cfg.targetId);
+    if (!target) return;
+    const switchgear = sensorRules.switching(target);
+    const field = (id, label, html) => `<div class="field"><label for="${id}">${label}</label>${html}</div>`;
+    const opt = (v, title, current) => `<option value="${escapeAttr(v)}"${v === current ? " selected" : ""}>${escapeHtml(title)}</option>`;
+    const noun = target.type === "battery" ? "Battery rate" : target.type === "source" ? "Generation" : "Load";
+    const labels = { none: "No action", increase: noun + " +", decrease: noun + " -", trip: "Trip line", reclose: "Reclose line" };
+    if (target.type === "battery") { labels.increase += " (toward discharge)"; labels.decrease += " (toward charge)"; }
+    const rule = side => {
+      const r = cfg[side];
+      return `<div class="prop-group"><h3>${side === "excess" ? "Excess" : "Deficit"} law</h3>` +
+        field(side+"Hz", "Threshold (Hz)", `<input type="number" id="${side}Hz" min="59" max="61" step="0.01" value="${r.hz}">`) +
+        field(side+"Action", "Action", `<select id="${side}Action">${sensorRules.actions(target).map(a => opt(a, labels[a], r.action)).join("")}</select>`) +
+        (["increase","decrease"].includes(r.action) && !switchgear ?
+          field(side+"Kw", "Change (kW)", `<input type="number" id="${side}Kw" min="0" max="100000" step="1" value="${r.kw}">`) : "") + "</div>";
+    };
+    propertiesEl.innerHTML = `<div id="sensorSettings"><div class="prop-group"><h3>Frequency sensor</h3>
+      ${field("sensorName", "Name", `<input id="sensorName" type="text" value="${escapeAttr(node.name)}"${state.running ? " disabled" : ""}>`)}
+      <div class="readout-row"><span class="readout-label">Target</span><span class="readout-value">${escapeHtml(target.name)}</span></div>
+      ${field("sensorMode", "Mode", `<select id="sensorMode">${opt("idle","Idle",cfg.mode)}<option id="sensorAuto" value="auto"${cfg.mode === "auto" ? " selected" : ""}>Auto</option></select>`)}
+      <div class="readout-row"><span class="readout-label">Signal</span><span class="readout-value" id="sensorSignal"></span></div>
+      ${switchgear ? field("sensorLine","Controlled line",`<select id="sensorLine">${opt("","Select line",cfg.lineId)}${incidentLines(target.id).map(l => opt(l.id, l.id + " · " + (l.name || getNode(l.from === target.id ? l.to : l.from)?.name || ""), cfg.lineId)).join("")}</select>`) : ""}
+      </div>${rule("excess")}${rule("deficit")}</div>`;
+    refreshSensorReadout(node);
+    const listen = (id, fn, rebuild = false) => document.getElementById(id)?.addEventListener("change", event => {
+      if (fn(event.target.value, event.target) === false) return;
+      if (state.running) runSimulationStep({ advanceSeconds: 0, renderProperties: false });
+      else { reconcilePausedSensors(); updateSummaries(); }
+      if (rebuild) renderSensorProperties(node);
+      else refreshSensorReadout(node);
+      draw();
+    });
+    listen("sensorName", (value, input) => { if (!state.running && value.trim()) node.name = value.trim(); input.value = node.name; });
+    listen("sensorMode", (value, input) => { input.value = cfg.mode = value === "auto" && hasSensorReference(target) ? "auto" : "idle"; });
+    if (switchgear) listen("sensorLine", value => { cfg.lineId = value; });
+    for (const side of ["excess","deficit"]) {
+      listen(side+"Hz", (value, input) => {
+        const hz = Number(value);
+        if (value !== "" && hz >= 59 && hz <= 61 && (side === "excess" ? hz > cfg.deficit.hz : hz < cfg.excess.hz)) cfg[side].hz = hz;
+        else { input.value = cfg[side].hz; setCanvasStatus("Use 59-61 Hz with deficit below excess"); return false; }
+      });
+      listen(side+"Action", value => { if (sensorRules.actions(target).includes(value)) cfg[side].action = value; }, true);
+      listen(side+"Kw", (value, input) => {
+        if (value && Number.isFinite(+value)) cfg[side].kw = clamp(Math.round(+value), 0, 100000);
+        input.value = cfg[side].kw;
+      });
+    }
+  }
+
   function renderNodeProperties(node) {
+    if (node.type === "sensor") return renderSensorProperties(node);
     const levels = activeLevels(node);
     const incident = incidentLines(node.id);
     const slider = node.type === "source" || node.type === "load";
@@ -4124,6 +4340,7 @@
           ${node.type === "source" && ["wind", "solar", "geothermal"].includes(node.sourceType) ? `<div class="readout-row"><span class="readout-label">Zone yield</span><span class="readout-value">${Math.round(sourceYieldFactor(node) * 100)}%</span></div>` : ""}
           ${node.type === "load" ? `<div class="readout-row"><span class="readout-label">Load type</span><span class="readout-value">${escapeHtml(loadTypeLabel(node))}</span></div>` : ""}
           <div class="readout-row"><span class="readout-label">Position</span><span class="readout-value">${Math.round(node.x)}, ${Math.round(node.y)} m</span></div>
+          ${sensorControl.offsets.has(node.id) ? `<div class="readout-row"><span class="readout-label">Request with sensors</span><span class="readout-value">${formatKw(commandedPower(node))}</span></div>` : ""}
         </div>
         ${node.type === "flywheel" ? `
           ${flywheelControls([node])}
@@ -4175,7 +4392,7 @@
           </div>
           <div class="field">
             <div class="field-row">
-              <label for="powerSlider">${powerLocked ? "Computer-controlled" : "Actual"} ${sliderTitle.toLowerCase()}</label>
+              <label for="powerSlider">${powerLocked ? "Computer-controlled" : sensorControl.offsets.has(node.id) ? "Base" : "Actual"} ${sliderTitle.toLowerCase()}</label>
               <span class="field-value" id="powerReadout">${formatKw(node.powerKw)}</span>
             </div>
             <input id="powerSlider" type="range" min="${sliderMin}" max="${sliderMax}" step="${sliderStep}" value="${node.powerKw}"${powerLocked ? " disabled" : ""}>
@@ -4594,6 +4811,7 @@
 
   function labelType(type) {
     const map = {
+      sensor: "Sensor",
       flywheel: "Flywheel",
       source: "Source",
       joint: "Substation",
@@ -4607,8 +4825,8 @@
 
   function computeTotals() {
     return {
-      sourceKw: state.nodes.filter((node) => node.type === "source").reduce((sum, node) => sum + node.powerKw, 0),
-      loadKw: state.nodes.filter((node) => node.type === "load").reduce((sum, node) => sum + node.powerKw, 0),
+      sourceKw: state.nodes.filter((node) => node.type === "source").reduce((sum, node) => sum + commandedPower(node), 0),
+      loadKw: state.nodes.filter((node) => node.type === "load").reduce((sum, node) => sum + commandedPower(node), 0),
       batteryKw: state.nodes.filter((node) => node.type === "battery").reduce((sum, node) => sum + node.batteryPowerKw, 0),
       batteryEnergyGJ: state.nodes.filter((node) => node.type === "battery").reduce((sum, node) => sum + batteryEnergyGJ(node), 0),
       batteryCapacityGJ: state.nodes.filter((node) => node.type === "battery").reduce((sum, node) => sum + batteryCapacityGJ(node), 0),
@@ -4720,6 +4938,7 @@
   function normalizeNode(node, fallbackId) {
     const source = node && typeof node === "object" ? node : {};
     source.type = normalizeNodeType(source.type ?? source.node_type ?? source.nodeType, source);
+    if (source.type === "sensor") source.sensor = sensorRules.normalize(source.sensor || {});
     if (source.type === "flywheel") {
       source.rotorActive = source.rotorActive === true;
       source.flywheelMass = flywheelModel(source.flywheelMass).mass;
@@ -4857,8 +5076,11 @@
         generatorVersion: world.generatorVersion,
         generatorSignature: world.generatorSignature
       },
-      nodes: state.nodes.map((node) => ({ ...node })),
-      lines: state.lines.map((line) => ({ ...line })),
+      nodes: state.nodes.map(node => node.type === "sensor" ? { ...node, sensor: sensorRules.normalize(node.sensor) } : { ...node }),
+      lines: state.lines.map(line => {
+        const hold = sensorControl.switches.get(line.id);
+        return hold ? { ...line, sensorReturnOnline: hold.base, sensorReturnTripped: hold.baseTripped } : { ...line };
+      }),
       nextNodeId: state.nextNodeId,
       nextLineId: state.nextLineId,
       elapsedSeconds: state.elapsedSeconds,
@@ -4981,17 +5203,51 @@
         usedNodeIds.add(nextId);
         return normalized;
       });
+      const usedSlots = new Map();
+      let skippedSensors = 0;
+      const importedNodes = currentNodeIndex();
+      state.nodes = state.nodes.filter(node => {
+        if (node.type !== "sensor") return true;
+        const t = importedNodes.get(node.sensor.targetId), count = usedSlots.get(t?.id) || 0;
+        if (count >= sensorRules.slots(t)) { skippedSensors++; return false; }
+        usedSlots.set(t.id, count + 1);
+        if (!sensorRules.eligible(t)) node.sensor.mode = "idle";
+        return true;
+      });
       const nodeIds = new Set(state.nodes.map((node) => node.id));
       let skippedLines = 0;
       state.lines = collectionItems(data.lines)
         .map((line, index) => normalizeLine(line, `L${index + 1}`))
         .filter((line) => {
           const valid = line.from !== line.to && nodeIds.has(line.from) && nodeIds.has(line.to)
+            && getNode(line.from).type !== "sensor" && getNode(line.to).type !== "sensor"
             && (line.type !== "transmission" || (getNode(line.from).type !== "flywheel" && getNode(line.to).type !== "flywheel"));
           if (!valid) skippedLines += 1;
           return valid;
         });
       state.lines.forEach(updateLineGeometry);
+      // Restore latches without reissuing a saved command that an operator or breaker already overruled.
+      currentNodeIndex();
+      sensorControl.switches.clear();
+      sensorControl.offsets.clear();
+      const savedSwitches = new Map();
+      for (const s of sensorNodes) {
+        const cfg = s.sensor, line = getLine(cfg.lineId);
+        if (!line || !sensorRules.switching(getNode(cfg.targetId)) || (line.from !== cfg.targetId && line.to !== cfg.targetId)) cfg.lineId = "";
+        else if (typeof line.sensorReturnOnline === "boolean") savedSwitches.set(line.id, {
+          online: line.online, tripped: line.tripped, base: line.sensorReturnOnline, baseTripped: line.sensorReturnTripped === true
+        });
+      }
+      reconcilePausedSensors();
+      for (const [id, {online, tripped, base, baseTripped}] of savedSwitches) {
+        const entry = sensorControl.switches.get(id);
+        if (entry) {
+          entry.base = base;
+          entry.baseTripped = baseTripped;
+          Object.assign(getLine(id), { online, tripped });
+        }
+      }
+      for (const line of state.lines) { delete line.sensorReturnOnline; delete line.sensorReturnTripped; }
       state.nextNodeId = Math.max(Number(data.nextNodeId) || 0, inferNextId(state.nodes, "N"));
       state.nextLineId = Math.max(Number(data.nextLineId) || 0, inferNextId(state.lines, "L"));
       state.elapsedSeconds = Math.max(0, Math.floor(Number(data.elapsedSeconds) || 0));
@@ -5019,6 +5275,7 @@
       state.simulationNeedsSolve = true;
       state.warnings = [];
       if (skippedLines) state.warnings.push(`Skipped ${skippedLines} line${skippedLines === 1 ? "" : "s"} with invalid endpoints.`);
+      if (skippedSensors) state.warnings.push(`Skipped ${skippedSensors} invalid sensor connection(s).`);
       if (worldDescriptor.inferredSeed) {
         state.warnings.push("This legacy grid had no world seed. GRIDBOX assigned repeatable geography; export it again to lock the world descriptor.");
       }
@@ -5064,6 +5321,8 @@
 
   function clearNetwork() {
     stopSimulation("", false);
+    sensorControl.offsets.clear();
+    sensorControl.switches.clear();
     resetWorld();
     state.nodes = [];
     state.lines = [];
@@ -5199,8 +5458,6 @@
         removeSelection();
       }
       if (event.key === "Escape") {
-        state.connecting = null;
-        closePlacementPickers();
         setMode("select");
       }
       if (key === "q" && !command && !isTextEditingTarget(event.target)) {

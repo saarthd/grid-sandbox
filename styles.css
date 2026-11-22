@@ -551,11 +551,10 @@ svg text {
   pointer-events: none;
 }
 
-#alarmLayer:not([hidden]) { animation: grid-alarm 1s steps(1, end) infinite; }
-@keyframes grid-alarm { 50% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) {
-  #alarmLayer:not([hidden]) { animation: none; }
+@media (prefers-reduced-motion: no-preference) {
+  #alarmLayer.running:not([hidden]) { animation: grid-alarm 1s steps(1, end) infinite; }
 }
+@keyframes grid-alarm { 50% { opacity: 0; } }
 .frequency-chip { font-variant-numeric: tabular-nums; }
 .frequency-panel { margin: 12px 0; padding: 12px; border-top: 1px solid var(--line); }
 .frequency-panel h3 { margin: 0; font-size: 14px; }

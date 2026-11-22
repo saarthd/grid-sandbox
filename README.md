@@ -33,6 +33,7 @@ Run mode advances simulated time in one-second steps. During a run:
 - Constant source output and constant load demand can still be changed within their configured ranges.
 - Variable sources and loads are controlled by the simulator.
 - Lines can be selected, manually tripped, and reclosed, including as a group.
+- Frequency sensors can be armed, returned to Idle, or retuned without pausing.
 - Source and load ranges, names, battery capacity and max rate, substation ratings, and network geometry are locked. Battery dispatch stays editable.
 - Batteries charge or discharge every second according to their most recently calculated dispatch.
 - A full power-flow calculation is performed only when the electrical state changes, such as after a setpoint change, variable-profile update, line trip, line reclose, or battery limit event.
@@ -217,6 +218,28 @@ At **61 Hz**, protection curtails sources proportionally to keep a surplus from 
 
 **Responding to trouble.** For falling frequency, reduce charging, discharge storage, increase generation, or trip a nonessential load feeder. For rising frequency, reduce discharge, charge storage, or lower generation. At a protection limit, batteries pushing in the wrong direction are backed off first; any remaining adjustment is shared among sources or loads. Inspect the line current before reclosing a tripped feeder. A wheel's full exchange flows through its connections, in either direction: 6 MW on a single 10 kV feeder is about 600 A before losses and will trip a 500 A line. Reclosing without reducing the flow can trip it again on the next tick.
 
+## Frequency Sensors
+
+In Edit mode, choose **Add frequency sensor** (the square with a dot). Click once to place the sensor, then click the equipment it should control. The thin wire carries a signal, not power: it has no current or losses and cannot join electrical islands. Use **Select** to reopen a sensor's inspector. New sensors start in **Idle**.
+
+| Target | Sensors per target | Available action |
+|---|---:|---|
+| Constant coal / natural gas source | 1 / 3 | Raise or lower requested generation |
+| Constant nuclear / hydroelectric source | 2 each | Raise or lower requested generation |
+| Constant load | 1 | Raise or lower requested demand |
+| Battery | 4 | Raise or lower the signed battery command (+ toward discharge, - toward charge) |
+| Pole or tower | 2 | Trip or reclose one attached power line chosen in each sensor's inspector |
+
+Variable sources and loads cannot be controlled. Changing an attached target to **Variable** leaves its wire in place but disarms the sensor. To use it again, switch the target to **Constant** and re-arm it.
+
+**Set up a rule.** Choose thresholds and actions for **Deficit** and **Excess**, then select **Auto**. The target needs a flywheel reachable through in-service lines; the sensor reads that island's frequency, not a map-wide average. A dark sensor is Idle. In Auto, its center is green for Normal, yellow for Deficit, or blue for Excess. The color is steady in Edit mode and blinks during a run unless reduced motion is enabled. The inspector also names the law, so you do not need to rely on color. You can change the thresholds, actions, and mode during a run.
+
+**When actions apply.** With the default thresholds, a reading below 59.6 Hz activates Deficit. It stays active until frequency recovers to 59.7 Hz. Above 60.4 Hz, Excess activates and stays active until frequency falls to 60.3 Hz. The return margin is 0.1 Hz or one-third of the gap between thresholds, whichever is smaller. Choose thresholds inside the grid's 59 and 61 Hz protection limits if you want a sensor to act before protection. A law can also be set to **No action**.
+
+A kW action applies **once**, not once per second. For example, put two sensors on a 2,000 kW gas plant: request +500 kW below 59.6 Hz and +1,000 kW below 59.4 Hz. When both are active, the request is 3,500 kW, provided the plant's range allows it. As each law releases, only its own contribution disappears. Your manual setpoint remains editable. Sensor requests still obey equipment ranges, battery reserve and rate limits, and grid protection.
+
+**Switching and signal loss.** A trip takes priority over a simultaneous reclose on the same line. When the last command releases, the line returns to its previous state unless the operator or overload protection changed it in the meantime. A sensor that attempts to reclose an overloaded line does not retry every second. If a trip cuts a sensor off from its flywheel, the inspector shows **No signal** and the sensor holds its last law rather than immediately undoing the trip. Select **Idle** to release it deliberately. Pausing or exporting and importing preserves active laws and breaker states.
+
 ## Power-Flow Mechanics
 
 ### Electrical islands
@@ -227,7 +250,7 @@ GRIDBOX divides the active network into connected islands using only lines that 
 
 For each island, the simulator compares requested source generation with requested load and estimated network losses:
 
-1. Apply each battery's signed manual command within its rate, reserve, and remaining capacity.
+1. Combine active sensor adjustments with the operator's generation, demand and battery requests. Limit each battery's signed command by its rate, reserve, and remaining capacity.
 2. Combine battery power with generation, demand, and estimated line losses.
 3. Flywheels absorb any remaining surplus or supply the remaining deficit until frequency protection intervenes.
 4. In an island without flywheels, there is no modeled inertial buffer: excess generation is curtailed or unmet demand is shed immediately. Constant and variable sources share curtailment proportionally.

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>GRIDBOX Electrical Simulator</title>
-    <link rel="stylesheet" href="styles.css?v=11">
+    <link rel="stylesheet" href="styles.css?v=12">
   </head>
   <body>
     <div class="app-shell">
@@ -89,6 +89,9 @@
           </button>
           <button class="tool-button" type="button" data-mode="battery" title="Add battery node" aria-label="Add battery node">
             <span class="tool-glyph battery-glyph" aria-hidden="true"></span>
+          </button>
+          <button class="tool-button" type="button" data-mode="sensor" title="Add frequency sensor" aria-label="Add frequency sensor">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
           <button class="tool-button" type="button" data-mode="flywheel" data-picker-trigger="flywheel" title="Choose a flywheel" aria-label="Choose a flywheel">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="white"></circle><path d="M5 12h14M12 5v14"></path></svg>
@@ -201,7 +204,8 @@
 
     <script src="world.js?v=099806de2210" defer></script>
     <script src="grid-engine.js?v=11" defer></script>
-    <script src="demo-grid.js?v=1" defer></script>
-    <script src="app.js?v=16" defer></script>
+    <script src="demo-grid.js?v=2" defer></script>
+    <script src="sensors.js?v=2" defer></script>
+    <script src="app.js?v=18" defer></script>
   </body>
 </html>
